@@ -29,6 +29,13 @@ nginx/ssl/
 .vscode/
 *.swp
 
+# Xcode
+xcuserdata/
+*.xcuserstate
+*.xccheckout
+*.xcscmblueprint
+DerivedData/
+
 # OS
 .DS_Store
 Thumbs.db
