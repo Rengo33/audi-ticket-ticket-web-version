@@ -1,0 +1,34 @@
+# Dependencies
+node_modules/
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Environment
+.env
+.env.local
+
+# Database
+data/
+*.db
+
+# Build
+dist/
+build/
+
+# Logs
+*.log
+
+# SSL Certs
+certbot/
+nginx/ssl/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
