@@ -34,7 +34,7 @@ class ConnectionManager:
         for connection in self.active_connections:
             try:
                 await connection.send_text(data)
-            except:
+            except Exception:
                 disconnected.add(connection)
         
         # Clean up disconnected clients
@@ -74,7 +74,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 # Send keepalive ping
                 try:
                     await websocket.send_text(json.dumps({"type": "ping"}))
-                except:
+                except Exception:
                     break
                     
     except WebSocketDisconnect:

@@ -6,19 +6,19 @@
           <span class="badge" :class="statusClass">
             {{ statusText }}
           </span>
-          <span v-if="task.status === 'running'" class="text-sm text-white/60">
+          <span v-if="task.status === 'running'" class="text-sm text-gray-400">
             Scan #{{ task.scan_count }}
           </span>
-          <span v-if="task.status === 'running'" class="text-sm" :class="task.tickets_available > 0 ? 'text-green-400' : 'text-orange-400'">
+          <span v-if="task.status === 'running'" class="text-sm" :class="task.tickets_available > 0 ? 'text-green-600' : 'text-orange-600'">
             • {{ task.tickets_available > 0 ? `${task.tickets_available} verfügbar` : 'Keine Tickets' }}
           </span>
         </div>
         
-        <div class="text-sm text-white/70 truncate mb-1" :title="task.product_url">
+        <div class="text-sm text-gray-500 truncate mb-1" :title="task.product_url">
           {{ task.product_url }}
         </div>
         
-        <div class="text-sm text-white/50">
+        <div class="text-sm text-gray-400">
           Menge: {{ task.quantity }} • Threads: {{ task.num_threads }}
           <span v-if="task.event_id"> • Event: {{ task.event_id }}</span>
         </div>
@@ -28,9 +28,9 @@
         </div>
         
         <!-- Checkout Link for successful carts -->
-        <div v-if="task.status === 'success' && task.cart_token" class="mt-3 pt-3 border-t border-white/10">
+        <div v-if="task.status === 'success' && task.cart_token" class="mt-3 pt-3 border-t border-gray-200">
           <a
-            :href="`/checkout/${task.cart_token}`"
+            :href="`/checkout/${task.cart_token}/cart`"
             target="_blank"
             class="btn btn-primary inline-flex items-center gap-2"
           >
@@ -55,7 +55,7 @@
         </button>
         
         <button
-          v-if="task.status === 'running'"
+          v-if="task.status === 'running' || task.status === 'success' || task.status === 'waiting'"
           @click="$emit('stop', task.id)"
           class="btn btn-danger"
         >
@@ -63,7 +63,7 @@
         </button>
         
         <button
-          v-if="task.status !== 'running'"
+          v-if="task.status !== 'running' && task.status !== 'success' && task.status !== 'waiting'"
           @click="confirmDelete"
           class="btn btn-secondary"
         >
@@ -94,6 +94,7 @@ const statusClass = computed(() => {
   const classes = {
     'running': 'badge-running',
     'success': 'badge-success',
+    'waiting': 'badge-waiting',
     'failed': 'badge-failed',
     'pending': 'badge-pending',
     'stopped': 'badge-stopped'
@@ -105,6 +106,7 @@ const statusText = computed(() => {
   const texts = {
     'running': '🔄 Läuft',
     'success': '✅ Erfolgreich',
+    'waiting': '⏳ Re-Cart Countdown',
     'failed': '❌ Fehler',
     'pending': '⏳ Wartend',
     'stopped': '⏸️ Gestoppt'
@@ -119,7 +121,7 @@ function confirmDelete() {
 }
 
 function copyCheckoutLink() {
-  const url = `${window.location.origin}/checkout/${props.task.cart_token}`
+  const url = `${window.location.origin}/checkout/${props.task.cart_token}/cart`
   navigator.clipboard.writeText(url)
   alert('Link kopiert!')
 }

@@ -42,6 +42,7 @@ class GameResponse(BaseModel):
     is_available: bool
     status: str
     is_scheduled: bool = False
+    scheduled_count: int = 0
     scheduled_task_id: Optional[int] = None
 
 
@@ -49,6 +50,7 @@ class ScheduleRequest(BaseModel):
     game_id: str
     quantity: int = 4
     num_threads: int = 5
+    price_category: int = 0
 
 
 class ScheduledTaskResponse(BaseModel):
@@ -58,10 +60,21 @@ class ScheduledTaskResponse(BaseModel):
     product_url: str
     quantity: int
     num_threads: int
+    price_category: int = 0
     scheduled_date: str
     status: str
     task_id: Optional[int]
     created_at: str
+
+    @classmethod
+    def from_model(cls, s) -> 'ScheduledTaskResponse':
+        return cls(
+            id=s.id, game_id=s.game_id, game_title=s.game_title,
+            product_url=s.product_url, quantity=s.quantity,
+            num_threads=s.num_threads, price_category=s.price_category or 0,
+            scheduled_date=s.scheduled_date.isoformat(), status=s.status,
+            task_id=s.task_id, created_at=s.created_at.isoformat()
+        )
 
 
 @router.get("", response_model=List[GameResponse])
@@ -74,7 +87,7 @@ async def list_games(
     
     # Check cache
     now = datetime.utcnow()
-    if _games_cache["updated_at"] and (now - _games_cache["updated_at"]).seconds < CACHE_TTL:
+    if _games_cache["updated_at"] and (now - _games_cache["updated_at"]).total_seconds() < CACHE_TTL:
         games = _games_cache["data"]
     else:
         # Refresh cache
@@ -91,18 +104,19 @@ async def list_games(
             else:
                 raise HTTPException(status_code=500, detail="Failed to fetch games")
     
-    # Get scheduled tasks
+    # Get scheduled tasks (group by game_id)
     scheduled = db.query(ScheduledTask).filter(
         ScheduledTask.status.in_(["scheduled", "triggered"])
     ).all()
-    scheduled_map = {s.game_id: s for s in scheduled}
-    
+    scheduled_by_game = {}
+    for s in scheduled:
+        scheduled_by_game.setdefault(s.game_id, []).append(s)
+
     # Build response
     result = []
     for g in games:
-        is_scheduled = g['id'] in scheduled_map
-        scheduled_task = scheduled_map.get(g['id'])
-        
+        game_scheduled = scheduled_by_game.get(g['id'], [])
+
         result.append(GameResponse(
             id=g['id'],
             title=g['title'],
@@ -115,8 +129,9 @@ async def list_games(
             sale_time=g['sale_time'],
             is_available=g['is_available'],
             status=g['status'],
-            is_scheduled=is_scheduled,
-            scheduled_task_id=scheduled_task.id if scheduled_task else None,
+            is_scheduled=len(game_scheduled) > 0,
+            scheduled_count=len(game_scheduled),
+            scheduled_task_id=game_scheduled[0].id if game_scheduled else None,
             image_url=g.get('image_url')
         ))
     
@@ -176,15 +191,6 @@ async def schedule_game(
     if not game['sale_date']:
         raise HTTPException(status_code=400, detail="Game has no sale date")
     
-    # Check if already scheduled
-    existing = db.query(ScheduledTask).filter(
-        ScheduledTask.game_id == request.game_id,
-        ScheduledTask.status == "scheduled"
-    ).first()
-    
-    if existing:
-        raise HTTPException(status_code=400, detail="Game already scheduled")
-    
     # Parse sale date and set time to 7:00 AM German time
     sale_date = date.fromisoformat(game['sale_date'])
     german_tz = ZoneInfo("Europe/Berlin")
@@ -202,6 +208,7 @@ async def schedule_game(
         product_url=game['url'],
         quantity=request.quantity,
         num_threads=request.num_threads,
+        price_category=request.price_category,
         scheduled_date=scheduled_utc,
         status="scheduled"
     )
@@ -212,18 +219,7 @@ async def schedule_game(
     
     logger.info(f"Scheduled task for {game['title']} at {scheduled_utc} UTC (7:00 AM German)")
     
-    return ScheduledTaskResponse(
-        id=scheduled_task.id,
-        game_id=scheduled_task.game_id,
-        game_title=scheduled_task.game_title,
-        product_url=scheduled_task.product_url,
-        quantity=scheduled_task.quantity,
-        num_threads=scheduled_task.num_threads,
-        scheduled_date=scheduled_task.scheduled_date.isoformat(),
-        status=scheduled_task.status,
-        task_id=scheduled_task.task_id,
-        created_at=scheduled_task.created_at.isoformat()
-    )
+    return ScheduledTaskResponse.from_model(scheduled_task)
 
 
 @router.get("/scheduled", response_model=List[ScheduledTaskResponse])
@@ -234,21 +230,7 @@ async def list_scheduled(
     """Get all scheduled tasks."""
     scheduled = db.query(ScheduledTask).order_by(ScheduledTask.scheduled_date).all()
     
-    return [
-        ScheduledTaskResponse(
-            id=s.id,
-            game_id=s.game_id,
-            game_title=s.game_title,
-            product_url=s.product_url,
-            quantity=s.quantity,
-            num_threads=s.num_threads,
-            scheduled_date=s.scheduled_date.isoformat(),
-            status=s.status,
-            task_id=s.task_id,
-            created_at=s.created_at.isoformat()
-        )
-        for s in scheduled
-    ]
+    return [ScheduledTaskResponse.from_model(s) for s in scheduled]
 
 
 @router.delete("/scheduled/{scheduled_id}")
@@ -263,10 +245,13 @@ async def cancel_scheduled(
     if not scheduled:
         raise HTTPException(status_code=404, detail="Scheduled task not found")
     
-    if scheduled.status != "scheduled":
-        raise HTTPException(status_code=400, detail="Task already triggered or completed")
-    
+    if scheduled.status == "triggered" and scheduled.task_id:
+        from ..bot.monitor import task_manager
+        await task_manager.stop_task(scheduled.task_id, db)
+    elif scheduled.status != "scheduled":
+        raise HTTPException(status_code=400, detail="Task already completed")
+
     db.delete(scheduled)
     db.commit()
-    
+
     return {"success": True}

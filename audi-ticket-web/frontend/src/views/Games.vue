@@ -42,7 +42,7 @@
         <div class="card-body">
           <h3>{{ game.opponent }}</h3>
           <p class="location">{{ game.location }}</p>
-          
+
           <div class="match-info">
             <div class="info-item">
               <span class="label">Match</span>
@@ -56,24 +56,21 @@
         </div>
 
         <div class="card-footer">
-          <template v-if="game.is_scheduled">
-            <div class="scheduled-badge">✓ Scheduled</div>
-            <button @click="cancelScheduled(game)" class="cancel-schedule-btn" :disabled="cancelling === game.scheduled_task_id">
-              {{ cancelling === game.scheduled_task_id ? 'Cancelling...' : 'Cancel Scheduled Task' }}
-            </button>
-          </template>
-          <button 
-            v-else-if="!game.is_available" 
+          <div v-if="game.scheduled_count > 0" class="scheduled-badge">
+            {{ game.scheduled_count }} task{{ game.scheduled_count > 1 ? 's' : '' }} scheduled
+          </div>
+          <button
+            v-if="!game.is_available"
             @click="scheduleGame(game)"
             class="schedule-btn"
             :disabled="scheduling === game.id"
           >
-            {{ scheduling === game.id ? 'Scheduling...' : 'Schedule Task' }}
+            {{ scheduling === game.id ? 'Scheduling...' : '+ Schedule Task' }}
           </button>
-          <a 
-            v-else 
-            :href="game.url" 
-            target="_blank" 
+          <a
+            v-else
+            :href="game.url"
+            target="_blank"
             class="buy-btn"
           >
             Buy Now →
@@ -87,7 +84,7 @@
       <div class="modal">
         <h3>Schedule Task</h3>
         <p class="modal-subtitle">for {{ selectedGame?.opponent }}</p>
-        
+
         <div class="form-group">
           <label>Quantity</label>
           <input v-model="scheduleQuantity" type="number" min="1" max="10">
@@ -96,12 +93,18 @@
           <label>Threads</label>
           <input v-model="scheduleThreads" type="number" min="1" max="20">
         </div>
-        
+        <div class="form-group">
+          <label>Price Category</label>
+          <select v-model="schedulePriceCategory">
+            <option v-for="cat in PRICE_CATEGORIES" :key="cat.value" :value="cat.value">{{ cat.label }}</option>
+          </select>
+        </div>
+
         <div class="sale-info">
           <span class="label">Sale starts:</span>
           <span class="value">{{ formatDate(selectedGame?.sale_date) }} {{ selectedGame?.sale_time }}</span>
         </div>
-        
+
         <div class="modal-actions">
           <button @click="showScheduleModal = false" class="cancel-btn">Cancel</button>
           <button @click="confirmSchedule" class="confirm-btn" :disabled="scheduling">
@@ -116,35 +119,17 @@
 <script setup>
 import { ref, onMounted } from 'vue';
 import { api } from '../stores/api';
+import { PRICE_CATEGORIES } from '../constants';
 
 const games = ref([]);
 const loading = ref(false);
 const error = ref(null);
 const scheduling = ref(null);
-const cancelling = ref(null);
-import { useScheduledStore } from '../stores/scheduled';
-const scheduledStore = useScheduledStore();
-const cancelScheduled = async (game) => {
-  if (!game.scheduled_task_id) return;
-  cancelling.value = game.scheduled_task_id;
-  try {
-    await api.delete(`/api/games/scheduled/${game.scheduled_task_id}`);
-    // Update local state
-    const idx = games.value.findIndex(g => g.id === game.id);
-    if (idx !== -1) {
-      games.value[idx].is_scheduled = false;
-      games.value[idx].scheduled_task_id = null;
-    }
-  } catch (e) {
-    alert('Failed to cancel: ' + (e.message || 'Unknown error'));
-  } finally {
-    cancelling.value = null;
-  }
-};
 const showScheduleModal = ref(false);
 const selectedGame = ref(null);
 const scheduleQuantity = ref(4);
 const scheduleThreads = ref(2);
+const schedulePriceCategory = ref(0);
 
 const fetchGames = async () => {
   loading.value = true;
@@ -168,8 +153,8 @@ const formatDate = (dateStr) => {
   if (!dateStr) return 'TBD';
   try {
     const date = new Date(dateStr);
-    return date.toLocaleDateString('de-DE', { 
-      day: '2-digit', 
+    return date.toLocaleDateString('de-DE', {
+      day: '2-digit',
       month: '2-digit',
       year: 'numeric'
     });
@@ -192,26 +177,24 @@ const scheduleGame = (game) => {
   selectedGame.value = game;
   scheduleQuantity.value = 4;
   scheduleThreads.value = 2;
+  schedulePriceCategory.value = 0;
   showScheduleModal.value = true;
 };
 
 const confirmSchedule = async () => {
   if (!selectedGame.value) return;
-  
+
   scheduling.value = selectedGame.value.id;
   try {
-    await api.post('/api/games/schedule', {
+    const response = await api.post('/api/games/schedule', {
       game_id: selectedGame.value.id,
       quantity: parseInt(scheduleQuantity.value),
-      num_threads: parseInt(scheduleThreads.value)
+      num_threads: parseInt(scheduleThreads.value),
+      price_category: parseInt(schedulePriceCategory.value)
     });
-    
-    // Mark as scheduled locally
-    const idx = games.value.findIndex(g => g.id === selectedGame.value.id);
-    if (idx !== -1) {
-      games.value[idx].is_scheduled = true;
-    }
-    
+
+    // Refresh games to update scheduled count
+    await fetchGames();
     showScheduleModal.value = false;
   } catch (e) {
     alert('Failed to schedule: ' + (e.message || 'Unknown error'));
@@ -227,17 +210,17 @@ onMounted(() => {
 
 <style scoped>
 .toolbar { margin-bottom: 2rem; display: flex; justify-content: flex-end; }
-.refresh-btn { background: #f2f2f7; color: #1c1c1e; padding: 12px 24px; border-radius: 12px; font-weight: 600; cursor: pointer; border: none; transition: 0.2s; }
-.refresh-btn:hover { background: #e5e5ea; }
+.refresh-btn { background: var(--hover-bg); color: var(--text-primary); padding: 12px 24px; border-radius: 12px; font-weight: 600; cursor: pointer; border: none; transition: 0.2s; }
+.refresh-btn:hover { background: var(--border-light); }
 .refresh-btn:disabled { opacity: 0.6; cursor: not-allowed; }
 
 .games-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 1.5rem; }
 
-.game-card { background: white; border-radius: 16px; overflow: hidden; transition: transform 0.2s, box-shadow 0.2s; border: 1px solid #e5e5ea; }
-.game-card:hover { transform: translateY(-2px); box-shadow: 0 10px 30px rgba(0,0,0,0.08); }
-.game-card.scheduled { border-color: #34c759; }
+.game-card { background: var(--card-bg); border-radius: 16px; overflow: hidden; transition: transform 0.2s, box-shadow 0.2s; border: 1px solid var(--border-light); }
+.game-card:hover { transform: translateY(-2px); box-shadow: 0 10px 30px var(--card-shadow); }
+.game-card.scheduled { border-color: var(--success); }
 
-.card-image { position: relative; height: 160px; background: linear-gradient(135deg, #1c1c1e, #3a3a3c); overflow: hidden; }
+.card-image { position: relative; height: 160px; background: linear-gradient(135deg, var(--card-image-gradient-start), var(--card-image-gradient-end)); overflow: hidden; }
 .card-image img { width: 100%; height: 100%; object-fit: cover; }
 .card-image.placeholder { display: flex; align-items: center; justify-content: center; font-size: 3rem; opacity: 0.3; }
 
@@ -248,59 +231,59 @@ onMounted(() => {
 .status-overlay.not_available { background: #8e8e93; color: white; }
 
 .card-body { padding: 1.25rem; }
-.card-body h3 { font-size: 1.15rem; font-weight: 700; margin-bottom: 4px; color: #1c1c1e; }
-.location { color: #6c6c70; font-size: 0.9rem; margin-bottom: 1rem; }
+.card-body h3 { font-size: 1.15rem; font-weight: 700; margin-bottom: 4px; color: var(--text-primary); }
+.location { color: var(--text-secondary); font-size: 0.9rem; margin-bottom: 1rem; }
 
-.match-info { background: #f9f9fb; padding: 12px; border-radius: 10px; }
+.match-info { background: var(--stat-bg); padding: 12px; border-radius: 10px; }
 .info-item { display: flex; justify-content: space-between; align-items: center; }
-.info-item + .info-item { margin-top: 8px; padding-top: 8px; border-top: 1px solid #e5e5ea; }
-.info-item .label { font-size: 0.8rem; color: #8e8e93; text-transform: uppercase; letter-spacing: 0.3px; }
-.info-item .value { font-size: 0.9rem; font-weight: 600; color: #1c1c1e; }
-.info-item .sale-date { color: #007AFF; }
+.info-item + .info-item { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border-light); }
+.info-item .label { font-size: 0.8rem; color: var(--text-tertiary); text-transform: uppercase; letter-spacing: 0.3px; }
+.info-item .value { font-size: 0.9rem; font-weight: 600; color: var(--text-primary); }
+.info-item .sale-date { color: var(--accent-blue); }
 
 .card-footer { padding: 0 1.25rem 1.25rem; }
 
-.schedule-btn { width: 100%; padding: 14px; background: #1c1c1e; color: white; border: none; border-radius: 12px; font-weight: 600; cursor: pointer; transition: 0.2s; }
-.schedule-btn:hover { background: #3a3a3c; }
+.schedule-btn { width: 100%; padding: 14px; background: var(--btn-primary-bg); color: var(--btn-primary-text); border: none; border-radius: 12px; font-weight: 600; cursor: pointer; transition: 0.2s; }
+.schedule-btn:hover { background: var(--btn-primary-hover); }
 .schedule-btn:disabled { opacity: 0.6; cursor: not-allowed; }
 
-.buy-btn { display: block; width: 100%; padding: 14px; background: #34c759; color: white; border: none; border-radius: 12px; font-weight: 600; text-align: center; text-decoration: none; transition: 0.2s; }
+.buy-btn { display: block; width: 100%; padding: 14px; background: var(--success); color: white; border: none; border-radius: 12px; font-weight: 600; text-align: center; text-decoration: none; transition: 0.2s; }
 .buy-btn:hover { background: #2db84d; }
 
-.scheduled-badge { text-align: center; padding: 14px; background: rgba(52, 199, 89, 0.1); color: #34c759; border-radius: 12px; font-weight: 600; }
+.scheduled-badge { text-align: center; padding: 14px; background: rgba(52, 199, 89, 0.1); color: var(--success); border-radius: 12px; font-weight: 600; }
 
 /* Loading & Empty States */
-.loading-state, .empty-state, .error-state { text-align: center; padding: 4rem 2rem; color: #8e8e93; }
+.loading-state, .empty-state, .error-state { text-align: center; padding: 4rem 2rem; color: var(--text-tertiary); }
 .empty-icon, .error-icon { font-size: 3rem; margin-bottom: 1rem; opacity: 0.5; }
-.spinner { width: 40px; height: 40px; border: 3px solid #e5e5ea; border-top-color: #1c1c1e; border-radius: 50%; animation: spin 1s linear infinite; margin: 0 auto 1rem; }
+.spinner { width: 40px; height: 40px; border: 3px solid var(--border-light); border-top-color: var(--text-primary); border-radius: 50%; animation: spin 1s linear infinite; margin: 0 auto 1rem; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
-.retry-btn { margin-top: 1rem; padding: 10px 20px; background: #1c1c1e; color: white; border: none; border-radius: 8px; cursor: pointer; }
+.retry-btn { margin-top: 1rem; padding: 10px 20px; background: var(--btn-primary-bg); color: var(--btn-primary-text); border: none; border-radius: 8px; cursor: pointer; }
 
 /* Modal */
-.modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center; backdrop-filter: blur(5px); z-index: 100; }
-.modal { background: white; padding: 2rem; border-radius: 20px; width: 100%; max-width: 400px; box-shadow: 0 20px 40px rgba(0,0,0,0.2); }
+.modal-overlay { position: fixed; inset: 0; background: var(--modal-overlay); display: flex; align-items: center; justify-content: center; backdrop-filter: blur(5px); z-index: 100; }
+.modal { background: var(--card-bg); padding: 2rem; border-radius: 20px; width: 100%; max-width: 400px; box-shadow: 0 20px 40px rgba(0,0,0,0.2); }
 .modal h3 { font-size: 1.4rem; font-weight: 700; margin-bottom: 0.25rem; }
-.modal-subtitle { color: #8e8e93; margin-bottom: 1.5rem; }
+.modal-subtitle { color: var(--text-tertiary); margin-bottom: 1.5rem; }
 
 .form-group { margin-bottom: 1.25rem; }
-.form-group label { display: block; font-size: 0.9rem; font-weight: 600; margin-bottom: 0.5rem; color: #1c1c1e; }
-.form-group input { width: 100%; padding: 12px; border: 1px solid #e5e5ea; border-radius: 10px; font-size: 1rem; }
+.form-group label { display: block; font-size: 0.9rem; font-weight: 600; margin-bottom: 0.5rem; color: var(--text-primary); }
+.form-group input, .form-group select { width: 100%; padding: 12px; border: 1px solid var(--border-light); border-radius: 10px; font-size: 1rem; background: var(--input-bg); color: var(--text-primary); }
 
-.sale-info { background: #f2f2f7; padding: 12px; border-radius: 10px; display: flex; justify-content: space-between; margin-bottom: 1.5rem; }
-.sale-info .label { color: #8e8e93; font-size: 0.85rem; }
-.sale-info .value { font-weight: 600; color: #007AFF; }
+.sale-info { background: var(--hover-bg); padding: 12px; border-radius: 10px; display: flex; justify-content: space-between; margin-bottom: 1.5rem; }
+.sale-info .label { color: var(--text-tertiary); font-size: 0.85rem; }
+.sale-info .value { font-weight: 600; color: var(--accent-blue); }
 
 .modal-actions { display: flex; justify-content: flex-end; gap: 1rem; }
-.cancel-btn { background: #f2f2f7; color: #1c1c1e; border: none; padding: 12px 20px; border-radius: 10px; font-weight: 600; cursor: pointer; }
-.confirm-btn { background: #1c1c1e; color: white; border: none; padding: 12px 20px; border-radius: 10px; font-weight: 600; cursor: pointer; }
+.cancel-btn { background: var(--hover-bg); color: var(--text-primary); border: none; padding: 12px 20px; border-radius: 10px; font-weight: 600; cursor: pointer; }
+.confirm-btn { background: var(--btn-primary-bg); color: var(--btn-primary-text); border: none; padding: 12px 20px; border-radius: 10px; font-weight: 600; cursor: pointer; }
 .confirm-btn:disabled { opacity: 0.6; }
 
 .cancel-schedule-btn {
   width: 100%;
   margin-top: 8px;
   padding: 12px;
-  background: #ff3b30;
+  background: var(--danger);
   color: white;
   border: none;
   border-radius: 10px;
@@ -311,5 +294,11 @@ onMounted(() => {
 .cancel-schedule-btn:disabled {
   opacity: 0.6;
   cursor: not-allowed;
+}
+
+@media (max-width: 768px) {
+  .games-grid { grid-template-columns: 1fr; }
+  .card-image { height: 120px; }
+  .modal { max-width: 95vw; padding: 1.5rem; }
 }
 </style>

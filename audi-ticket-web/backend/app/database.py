@@ -1,7 +1,10 @@
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text, inspect
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 import os
+import logging
+
+logger = logging.getLogger(__name__)
 
 from .config import get_settings
 
@@ -29,6 +32,23 @@ def get_db():
         db.close()
 
 
+def _add_column_if_missing(table_name: str, column_name: str, column_type: str):
+    """Add a column to an existing table if it doesn't exist (SQLite)."""
+    inspector = inspect(engine)
+    if table_name in inspector.get_table_names():
+        columns = [c['name'] for c in inspector.get_columns(table_name)]
+        if column_name not in columns:
+            with engine.begin() as conn:
+                conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}"))
+            logger.info(f"Added column {column_name} to {table_name}")
+
+
 def init_db():
     """Initialize database tables."""
     Base.metadata.create_all(bind=engine)
+    # Migrations for existing databases
+    _add_column_if_missing("tasks", "tickets_available", "INTEGER DEFAULT 0")
+    _add_column_if_missing("tasks", "last_scan_at", "DATETIME")
+    _add_column_if_missing("tasks", "price_category", "INTEGER DEFAULT 0")
+    _add_column_if_missing("scheduled_tasks", "price_category", "INTEGER DEFAULT 0")
+    _add_column_if_missing("cart_sessions", "price_category", "INTEGER DEFAULT 0")

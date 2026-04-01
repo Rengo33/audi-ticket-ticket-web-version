@@ -28,18 +28,21 @@ export const useCartStore = defineStore('cart', () => {
         _tick.value++
     }
 
+    // Backend stores UTC timestamps without Z suffix — append it for correct parsing
+    const parseUtc = (dateStr) => {
+        if (!dateStr) return new Date(0)
+        return new Date(typeof dateStr === 'string' && !dateStr.endsWith('Z') ? dateStr + 'Z' : dateStr)
+    }
+
     const validCarts = computed(() => {
-        // dep on _tick
         _tick.value
         const now = new Date()
         return carts.value.filter(c => {
-            const expiresAt = new Date(c.expires_at) // API likely returns ISO string
-            return expiresAt > now
+            return parseUtc(c.expires_at) > now
         }).map(c => ({
             ...c,
-            // Calculate progress or remaining time here if needed, or do it in component
-            expires_at: new Date(c.expires_at) // Ensure Date object
-        })).sort((a, b) => a.expires_at - b.expires_at) // Expiring soonest first? Or latest? Let's say expiring soonest first.
+            expires_at: parseUtc(c.expires_at)
+        })).sort((a, b) => a.expires_at - b.expires_at)
     })
 
     return {

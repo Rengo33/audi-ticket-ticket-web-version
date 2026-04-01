@@ -74,6 +74,7 @@ class TaskScheduler:
                         product_url=scheduled.product_url,
                         quantity=scheduled.quantity,
                         num_threads=scheduled.num_threads,
+                        price_category=scheduled.price_category or 0,
                         status=TaskStatus.PENDING.value
                     )
                     db.add(task)

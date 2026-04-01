@@ -9,6 +9,7 @@ services:
       - APP_PASSWORD=${APP_PASSWORD:-changeme}
       - SECRET_KEY=${SECRET_KEY:-change-this-secret}
       - DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_URL:-}
+      - BASE_URL=${BASE_URL:-http://localhost}
       - DATABASE_URL=sqlite:///./data/tickets.db
     volumes:
       - ./data:/app/data

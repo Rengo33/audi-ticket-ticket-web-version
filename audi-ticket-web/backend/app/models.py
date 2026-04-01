@@ -11,6 +11,7 @@ class TaskStatus(str, enum.Enum):
     PENDING = "pending"
     RUNNING = "running"
     SUCCESS = "success"
+    WAITING = "waiting"
     FAILED = "failed"
     STOPPED = "stopped"
 
@@ -25,6 +26,7 @@ class Task(Base):
     product_url = Column(String(500), nullable=False)
     quantity = Column(Integer, default=1)
     num_threads = Column(Integer, default=1)
+    price_category = Column(Integer, default=0)  # 0-based index into variations list
     
     # Status
     status = Column(String(20), default=TaskStatus.PENDING.value)
@@ -69,6 +71,7 @@ class CartSession(Base):
     
     # Metadata
     quantity = Column(Integer, default=1)
+    price_category = Column(Integer, default=0)
     total_time = Column(Float, nullable=True)  # Detection to cart time
     
     # Timestamps
@@ -104,7 +107,8 @@ class ScheduledTask(Base):
     # Task configuration
     quantity = Column(Integer, default=4)
     num_threads = Column(Integer, default=5)
-    
+    price_category = Column(Integer, default=0)
+
     # Schedule
     scheduled_date = Column(DateTime, nullable=False)  # Date/time when task should start (in UTC)
     

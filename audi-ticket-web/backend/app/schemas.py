@@ -20,6 +20,7 @@ class TaskCreate(BaseModel):
     product_url: str
     quantity: int = 1
     num_threads: int = 1
+    price_category: int = 0
 
 
 class TaskResponse(BaseModel):
@@ -27,6 +28,7 @@ class TaskResponse(BaseModel):
     product_url: str
     quantity: int
     num_threads: int
+    price_category: int = 0
     status: str
     scan_count: int
     tickets_available: int = 0  # Current ticket availability
@@ -56,6 +58,7 @@ class CartSessionResponse(BaseModel):
     product_url: str
     checkout_url: Optional[str]
     quantity: int
+    price_category: int = 0
     total_time: Optional[float]
     created_at: datetime
     expires_at: datetime

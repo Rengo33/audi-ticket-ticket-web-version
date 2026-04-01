@@ -9,8 +9,8 @@ const routes = [
   },
   {
     path: '/',
-    name: 'Dashboard',
-    component: () => import('./views/Dashboard.vue'),
+    name: 'Tasks',
+    component: () => import('./views/Tasks.vue'),
     meta: { requiresAuth: true }
   },
   {
@@ -21,9 +21,7 @@ const routes = [
   },
   {
     path: '/tasks',
-    name: 'Tasks',
-    component: () => import('./views/Tasks.vue'),
-    meta: { requiresAuth: true }
+    redirect: '/'
   },
   {
     path: '/carts',

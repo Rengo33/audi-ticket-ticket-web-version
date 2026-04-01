@@ -19,9 +19,12 @@ class Settings(BaseSettings):
     
     # Discord
     discord_webhook_url: str = ""
+
+    # Base URL for external links (checkout, Discord messages)
+    base_url: str = "http://localhost"
     
     # Bot Settings
-    default_scan_interval: float = 0.1  # seconds
+    default_scan_interval: float = 1.0  # seconds
     cart_hold_time: int = 1020  # 17 minutes in seconds
     
     class Config:

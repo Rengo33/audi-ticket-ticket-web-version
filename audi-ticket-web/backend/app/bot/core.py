@@ -63,46 +63,55 @@ class AudiTicketBot:
             await self.session.close()
             self.session = None
     
-    async def extract_event_details(self, product_url: str) -> Tuple[Optional[str], Optional[str]]:
+    async def extract_event_details(self, product_url: str) -> Tuple[Optional[str], Optional[str], list]:
         """
-        Extract Event ID and Ticket ID from product page.
-        
+        Extract Event ID, Ticket ID, and price category names from product page.
+
         Returns:
-            Tuple of (event_id, ticket_id) or (None, None) on error
+            Tuple of (event_id, ticket_id, categories) or (None, None, []) on error.
+            categories is a list of strings like ["Kategorie 1 - Block 136: 200,00 Euro", ...]
         """
         try:
             logger.info(f"Extracting event details from: {product_url}")
             logger.info(f"Session object: {self.session}")
-            
+
             response = await self.session.get(product_url)
-            
+
             logger.info(f"Response status: {response.status_code}, length: {len(response.text)}")
-            
+
             if response.status_code != 200:
                 logger.error(f"Status {response.status_code} fetching product page")
-                return None, None
-            
+                return None, None, []
+
             soup = BeautifulSoup(response.text, 'html.parser')
-            
+
             # Extract event ID from form action
             form = soup.find('form')
             event_id = None
             if form and form.get('action'):
                 event_id = form['action'].split('/')[-1]
-            
+
             # Extract ticket ID from meta tag
             ticket_id = None
             sku_tag = soup.find('meta', {'itemprop': 'sku'})
             if sku_tag and sku_tag.get('content'):
                 ticket_id = sku_tag['content'].split('-')[-1]
-            
+
+            # Extract price categories from page text (e.g. "Kategorie 1 - Block 136: 200,00 Euro")
+            categories = re.findall(
+                r'Kategorie\s+\d+\s*-\s*Block\s+\d+:\s*[\d,.]+\s*Euro',
+                response.text
+            )
+            if categories:
+                logger.info(f"Found price categories on page: {categories}")
+
             logger.info(f"Extracted: event_id={event_id}, ticket_id={ticket_id}")
-            
-            return event_id, ticket_id
-            
+
+            return event_id, ticket_id, categories
+
         except Exception as e:
             logger.error(f"Error extracting event details: {e}")
-            return None, None
+            return None, None, []
     
     async def get_available_tickets(
         self, 

@@ -34,7 +34,8 @@ async def create_task(
     task = Task(
         product_url=task_data.product_url,
         quantity=task_data.quantity,
-        num_threads=task_data.num_threads
+        num_threads=task_data.num_threads,
+        price_category=task_data.price_category
     )
     db.add(task)
     db.commit()
@@ -62,6 +63,7 @@ async def list_tasks(
             "product_url": task.product_url,
             "quantity": task.quantity,
             "num_threads": task.num_threads,
+            "price_category": task.price_category or 0,
             "status": task.status,
             "scan_count": task.scan_count,
             "tickets_available": task.tickets_available or 0,
@@ -145,6 +147,13 @@ async def start_task(
             logger.warning(f"Task {task_id} marked as running in DB but not in active_tasks - resetting status")
             task.status = TaskStatus.PENDING.value
             db.commit()
+
+    # Allow restarting a successful task
+    if task.status == TaskStatus.SUCCESS.value:
+        logger.info(f"Task {task_id} is in SUCCESS state, resetting for restart")
+        task.status = TaskStatus.PENDING.value
+        task.completed_at = None
+        db.commit()
     
     success = await task_manager.start_task(task, db)
     logger.info(f"task_manager.start_task returned: {success}")
