@@ -119,11 +119,13 @@
             </label>
         </div>
         <div class="form-group" v-if="newTask.auto_checkout">
-            <label>Billing Profile</label>
-            <select v-model="newTask.billing_profile_id" class="w-full">
-                <option :value="null">-- Profil wählen --</option>
-                <option v-for="p in billingProfiles" :key="p.id" :value="p.id">{{ p.name }} ({{ p.card_last4 ? '••••' + p.card_last4 : 'keine Karte' }})</option>
-            </select>
+            <label>Billing Profiles (round-robin)</label>
+            <div class="profile-checkboxes">
+                <label v-for="p in billingProfiles" :key="p.id" class="profile-check">
+                    <input type="checkbox" :value="p.id" v-model="newTask.billing_profile_ids">
+                    {{ p.name }} <span class="card-hint">{{ p.card_last4 ? '••••' + p.card_last4 : '' }}</span>
+                </label>
+            </div>
         </div>
 
         <div class="modal-actions">
@@ -143,7 +145,7 @@ import { PRICE_CATEGORIES, priceCategoryLabel } from '../constants';
 
 const taskStore = useTaskStore();
 const showModal = ref(false);
-const newTask = ref({ url: '', quantity: 2, num_threads: 2, price_category: 0, auto_checkout: false, billing_profile_id: null });
+const newTask = ref({ url: '', quantity: 2, num_threads: 2, price_category: 0, auto_checkout: false, billing_profile_ids: [] });
 const billingProfiles = ref([]);
 const scheduledTasks = ref([]);
 const cancellingId = ref(null);
@@ -193,11 +195,11 @@ const createTask = async () => {
         num_threads: parseInt(newTask.value.num_threads),
         price_category: parseInt(newTask.value.price_category),
         auto_checkout: newTask.value.auto_checkout,
-        billing_profile_id: newTask.value.auto_checkout ? newTask.value.billing_profile_id : null
+        billing_profile_id: newTask.value.auto_checkout ? newTask.value.billing_profile_ids.join(',') : null
     });
 
     showModal.value = false;
-    newTask.value = { url: '', quantity: 2, num_threads: 2, price_category: 0, auto_checkout: false, billing_profile_id: null };
+    newTask.value = { url: '', quantity: 2, num_threads: 2, price_category: 0, auto_checkout: false, billing_profile_ids: [] };
 };
 
 const fetchBillingProfiles = async () => {
@@ -307,6 +309,10 @@ onMounted(() => {
 .form-group input { width: 100%; padding: 12px; border: 1px solid var(--border-light); border-radius: 10px; font-size: 1rem; }
 .toggle-label { display: flex; align-items: center; gap: 8px; font-weight: 600; cursor: pointer; }
 .toggle-label input[type="checkbox"] { width: auto; }
+.profile-checkboxes { display: flex; flex-direction: column; gap: 6px; }
+.profile-check { display: flex; align-items: center; gap: 8px; padding: 8px 12px; background: var(--stat-bg); border-radius: 8px; cursor: pointer; font-size: 0.95rem; }
+.profile-check input[type="checkbox"] { width: auto; }
+.card-hint { color: var(--text-tertiary); font-size: 0.8rem; }
 .form-row { display: flex; gap: 1rem; }
 .form-row .form-group { flex: 1; }
 

@@ -317,9 +317,21 @@ class AvailabilityWatcher:
 
     async def _run_auto_checkout(self, sub: TaskSubscriber, task: Task, db: Session):
         """Run the full auto-checkout flow after successful ATC."""
-        profile = db.query(BillingProfile).filter(BillingProfile.id == task.billing_profile_id).first()
-        if not profile:
-            await self.manager._log(sub.task_id, "error", "ACO: Billing profile not found", db)
+        # Support multiple billing profiles (comma-separated IDs)
+        profile_id_str = str(task.billing_profile_id or "")
+        profile_ids = [int(x.strip()) for x in profile_id_str.split(",") if x.strip().isdigit()]
+
+        if not profile_ids:
+            await self.manager._log(sub.task_id, "error", "ACO: No billing profile IDs configured", db)
+            return
+
+        profiles = db.query(BillingProfile).filter(BillingProfile.id.in_(profile_ids)).all()
+        profile_map = {p.id: p for p in profiles}
+
+        # Maintain the order from the config
+        ordered_profiles = [profile_map[pid] for pid in profile_ids if pid in profile_map]
+        if not ordered_profiles:
+            await self.manager._log(sub.task_id, "error", "ACO: Billing profile(s) not found", db)
             return
 
         # Get only pending, non-expired cart sessions from this cart cycle
@@ -334,10 +346,13 @@ class AvailabilityWatcher:
             await self.manager._log(sub.task_id, "error", "ACO: No pending cart sessions found", db)
             return
 
+        profile_names = ", ".join(p.name for p in ordered_profiles)
         await self.manager._log(sub.task_id, "info",
-            f"ACO: Processing {len(carts)} cart(s) with profile '{profile.name}'...", db)
+            f"ACO: Processing {len(carts)} cart(s) with {len(ordered_profiles)} profile(s): {profile_names}", db)
 
         for i, cart in enumerate(carts):
+            # Round-robin assign profiles to carts
+            profile = ordered_profiles[i % len(ordered_profiles)]
             if i > 0:
                 await self.manager._log(sub.task_id, "info", "ACO: Waiting 15s before next checkout...", db)
                 await asyncio.sleep(15)

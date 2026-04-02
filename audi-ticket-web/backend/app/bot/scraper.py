@@ -31,6 +31,7 @@ class BayernGame:
     sale_time: str = "07:00"  # Default 7 AM
     is_available: bool = False
     status: str = "upcoming"  # upcoming, on_sale, sold_out
+    price_categories: Optional[List[Dict[str, Any]]] = None  # [{name, price}, ...]
     
     def to_dict(self) -> Dict[str, Any]:
         d = asdict(self)
@@ -215,7 +216,15 @@ class BayernScraper:
             elif sale_date and sale_started:
                 is_available = await self._check_availability(url)
                 status = "on_sale"
-            
+
+            # Extract price categories (e.g. "Kategorie 1 - Block 136: 80,00 Euro")
+            price_categories = []
+            for cat_match in re.finditer(r'(Kategorie\s+\d+\s*-\s*Block\s+\d+):\s*([\d,.]+)\s*Euro', html):
+                price_categories.append({
+                    "name": cat_match.group(1).strip(),
+                    "price": float(cat_match.group(2).replace(',', '.'))
+                })
+
             return BayernGame(
                 id=game_id,
                 title=title,
@@ -227,7 +236,8 @@ class BayernScraper:
                 match_time=match_time,
                 sale_date=sale_date,
                 is_available=is_available,
-                status=status
+                status=status,
+                price_categories=price_categories or None
             )
             
         except Exception as e:

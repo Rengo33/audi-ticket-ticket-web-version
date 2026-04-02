@@ -52,6 +52,14 @@
               <span class="label">Sale</span>
               <span class="value sale-date">{{ formatDate(game.sale_date) }} {{ game.sale_time || '' }}</span>
             </div>
+            <div class="info-item prices" v-if="game.price_categories && game.price_categories.length">
+              <span class="label">Prices</span>
+              <span class="value price-list">
+                <span v-for="(cat, i) in game.price_categories" :key="i" class="price-tag">
+                  {{ cat.name.replace('Kategorie ', 'Kat ') }}: {{ cat.price }}€
+                </span>
+              </span>
+            </div>
           </div>
         </div>
 
@@ -107,11 +115,13 @@
           </label>
         </div>
         <div class="form-group" v-if="scheduleAutoCheckout">
-          <label>Billing Profile</label>
-          <select v-model="scheduleBillingProfileId">
-            <option :value="null">-- Profil wählen --</option>
-            <option v-for="p in billingProfiles" :key="p.id" :value="p.id">{{ p.name }} ({{ p.card_last4 ? '••••' + p.card_last4 : 'keine Karte' }})</option>
-          </select>
+          <label>Billing Profiles (round-robin)</label>
+          <div class="profile-checkboxes">
+            <label v-for="p in billingProfiles" :key="p.id" class="profile-check">
+              <input type="checkbox" :value="p.id" v-model="scheduleBillingProfileIds">
+              {{ p.name }} <span class="card-hint">{{ p.card_last4 ? '••••' + p.card_last4 : '' }}</span>
+            </label>
+          </div>
         </div>
 
         <div class="sale-info">
@@ -145,7 +155,7 @@ const scheduleQuantity = ref(4);
 const scheduleThreads = ref(2);
 const schedulePriceCategory = ref(0);
 const scheduleAutoCheckout = ref(false);
-const scheduleBillingProfileId = ref(null);
+const scheduleBillingProfileIds = ref([]);
 const billingProfiles = ref([]);
 
 const fetchGames = async () => {
@@ -196,7 +206,7 @@ const scheduleGame = (game) => {
   scheduleThreads.value = 2;
   schedulePriceCategory.value = 0;
   scheduleAutoCheckout.value = false;
-  scheduleBillingProfileId.value = null;
+  scheduleBillingProfileIds.value = [];
   showScheduleModal.value = true;
 };
 
@@ -211,7 +221,7 @@ const confirmSchedule = async () => {
       num_threads: parseInt(scheduleThreads.value),
       price_category: parseInt(schedulePriceCategory.value),
       auto_checkout: scheduleAutoCheckout.value,
-      billing_profile_id: scheduleAutoCheckout.value ? scheduleBillingProfileId.value : null
+      billing_profile_id: scheduleAutoCheckout.value ? scheduleBillingProfileIds.value.join(',') : null
     });
 
     // Refresh games to update scheduled count
@@ -266,6 +276,9 @@ onMounted(() => {
 .info-item .label { font-size: 0.8rem; color: var(--text-tertiary); text-transform: uppercase; letter-spacing: 0.3px; }
 .info-item .value { font-size: 0.9rem; font-weight: 600; color: var(--text-primary); }
 .info-item .sale-date { color: var(--accent-blue); }
+.info-item.prices { flex-direction: column; align-items: flex-start; gap: 4px; }
+.price-list { display: flex; flex-wrap: wrap; gap: 4px; }
+.price-tag { background: var(--hover-bg); padding: 2px 8px; border-radius: 6px; font-size: 0.8rem; white-space: nowrap; }
 
 .card-footer { padding: 0 1.25rem 1.25rem; }
 
@@ -297,6 +310,10 @@ onMounted(() => {
 .form-group input, .form-group select { width: 100%; padding: 12px; border: 1px solid var(--border-light); border-radius: 10px; font-size: 1rem; background: var(--input-bg); color: var(--text-primary); }
 .toggle-label { display: flex; align-items: center; gap: 8px; font-weight: 600; cursor: pointer; }
 .toggle-label input[type="checkbox"] { width: auto; }
+.profile-checkboxes { display: flex; flex-direction: column; gap: 6px; }
+.profile-check { display: flex; align-items: center; gap: 8px; padding: 8px 12px; background: var(--stat-bg); border-radius: 8px; cursor: pointer; font-size: 0.95rem; }
+.profile-check input[type="checkbox"] { width: auto; }
+.card-hint { color: var(--text-tertiary); font-size: 0.8rem; }
 
 .sale-info { background: var(--hover-bg); padding: 12px; border-radius: 10px; display: flex; justify-content: space-between; margin-bottom: 1.5rem; }
 .sale-info .label { color: var(--text-tertiary); font-size: 0.85rem; }

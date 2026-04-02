@@ -28,7 +28,7 @@ class Task(Base):
     num_threads = Column(Integer, default=1)
     price_category = Column(Integer, default=0)
     auto_checkout = Column(Boolean, default=False)
-    billing_profile_id = Column(Integer, nullable=True)
+    billing_profile_id = Column(String(100), nullable=True)  # Comma-separated profile IDs for round-robin
 
     # Status
     status = Column(String(20), default=TaskStatus.PENDING.value)
@@ -118,7 +118,7 @@ class ScheduledTask(Base):
     num_threads = Column(Integer, default=5)
     price_category = Column(Integer, default=0)
     auto_checkout = Column(Boolean, default=False)
-    billing_profile_id = Column(Integer, nullable=True)
+    billing_profile_id = Column(String(100), nullable=True)  # Comma-separated profile IDs for round-robin
 
     # Schedule
     scheduled_date = Column(DateTime, nullable=False)  # Date/time when task should start (in UTC)

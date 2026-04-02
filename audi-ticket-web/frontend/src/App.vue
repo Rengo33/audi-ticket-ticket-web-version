@@ -18,6 +18,9 @@
         <router-link to="/billing" class="nav-item">
           <span class="icon">💳</span> Billing
         </router-link>
+        <router-link to="/logs" class="nav-item">
+          <span class="icon">📋</span> Logs
+        </router-link>
       </div>
 
       <div class="user-profile">

@@ -1,6 +1,7 @@
 import { ref } from 'vue'
 import { useTaskStore } from './tasks'
 import { useCartStore } from './cart'
+import { useLogStore } from './logs'
 
 const connected = ref(false)
 let ws = null
@@ -89,6 +90,7 @@ export function useWebSocket() {
   function handleMessage(msg) {
     const taskStore = useTaskStore()
     const cartStore = useCartStore()
+    const logStore = useLogStore()
 
     switch (msg.type) {
       case 'task_update': {
@@ -117,7 +119,7 @@ export function useWebSocket() {
         break
 
       case 'log':
-        // Could be used for a log panel in the future
+        logStore.addLog(msg.data)
         break
 
       case 'aco_payment_ready':

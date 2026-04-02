@@ -41,6 +41,7 @@ class GameResponse(BaseModel):
     sale_time: str
     is_available: bool
     status: str
+    price_categories: Optional[list] = None
     is_scheduled: bool = False
     scheduled_count: int = 0
     scheduled_task_id: Optional[int] = None
@@ -52,7 +53,7 @@ class ScheduleRequest(BaseModel):
     num_threads: int = 5
     price_category: int = 0
     auto_checkout: bool = False
-    billing_profile_id: Optional[int] = None
+    billing_profile_id: Optional[str] = None
 
 
 class ScheduledTaskResponse(BaseModel):
@@ -134,7 +135,8 @@ async def list_games(
             is_scheduled=len(game_scheduled) > 0,
             scheduled_count=len(game_scheduled),
             scheduled_task_id=game_scheduled[0].id if game_scheduled else None,
-            image_url=g.get('image_url')
+            image_url=g.get('image_url'),
+            price_categories=g.get('price_categories')
         ))
     
     # Sort by sale date (closest first)

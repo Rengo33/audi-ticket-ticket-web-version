@@ -22,7 +22,7 @@ class TaskCreate(BaseModel):
     num_threads: int = 1
     price_category: int = 0
     auto_checkout: bool = False
-    billing_profile_id: Optional[int] = None
+    billing_profile_id: Optional[str] = None
 
 
 class TaskResponse(BaseModel):
@@ -32,7 +32,7 @@ class TaskResponse(BaseModel):
     num_threads: int
     price_category: int = 0
     auto_checkout: bool = False
-    billing_profile_id: Optional[int] = None
+    billing_profile_id: Optional[str] = None
     status: str
     scan_count: int
     tickets_available: int = 0  # Current ticket availability
