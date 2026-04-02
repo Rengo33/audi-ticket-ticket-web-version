@@ -35,7 +35,9 @@ async def create_task(
         product_url=task_data.product_url,
         quantity=task_data.quantity,
         num_threads=task_data.num_threads,
-        price_category=task_data.price_category
+        price_category=task_data.price_category,
+        auto_checkout=task_data.auto_checkout,
+        billing_profile_id=task_data.billing_profile_id
     )
     db.add(task)
     db.commit()
@@ -64,6 +66,8 @@ async def list_tasks(
             "quantity": task.quantity,
             "num_threads": task.num_threads,
             "price_category": task.price_category or 0,
+            "auto_checkout": getattr(task, 'auto_checkout', False) or False,
+            "billing_profile_id": getattr(task, 'billing_profile_id', None),
             "status": task.status,
             "scan_count": task.scan_count,
             "tickets_available": task.tickets_available or 0,

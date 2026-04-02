@@ -51,6 +51,8 @@ class ScheduleRequest(BaseModel):
     quantity: int = 4
     num_threads: int = 5
     price_category: int = 0
+    auto_checkout: bool = False
+    billing_profile_id: Optional[int] = None
 
 
 class ScheduledTaskResponse(BaseModel):
@@ -209,6 +211,8 @@ async def schedule_game(
         quantity=request.quantity,
         num_threads=request.num_threads,
         price_category=request.price_category,
+        auto_checkout=request.auto_checkout,
+        billing_profile_id=request.billing_profile_id,
         scheduled_date=scheduled_utc,
         status="scheduled"
     )

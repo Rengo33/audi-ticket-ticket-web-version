@@ -15,6 +15,9 @@
         <router-link to="/carts" class="nav-item">
           <span class="icon">🛒</span> Carts
         </router-link>
+        <router-link to="/billing" class="nav-item">
+          <span class="icon">💳</span> Billing
+        </router-link>
       </div>
 
       <div class="user-profile">

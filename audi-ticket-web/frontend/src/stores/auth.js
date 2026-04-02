@@ -32,13 +32,8 @@ export const useAuthStore = defineStore('auth', () => {
     }
   }
   
-  async function logout() {
-    try {
-      await api.post('/api/auth/logout')
-    } catch (e) {
-      // Ignore errors
-    }
-    
+  function logout() {
+    // Don't call server — just clear local state to avoid 401 loop
     token.value = null
     localStorage.removeItem('auth_token')
   }

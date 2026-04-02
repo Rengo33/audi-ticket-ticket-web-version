@@ -6,6 +6,8 @@ const connected = ref(false)
 let ws = null
 let reconnectTimer = null
 let getTokenFn = null
+let failCount = 0
+let pingInterval = null
 
 function getWsUrl(token) {
   const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
@@ -16,12 +18,14 @@ export function useWebSocket() {
   function connect(token, tokenGetter) {
     if (ws) disconnect()
     if (tokenGetter) getTokenFn = tokenGetter
+    failCount = 0
 
     const url = getWsUrl(token)
     ws = new WebSocket(url)
 
     ws.onopen = () => {
       connected.value = true
+      failCount = 0
       if (reconnectTimer) {
         clearTimeout(reconnectTimer)
         reconnectTimer = null
@@ -40,7 +44,9 @@ export function useWebSocket() {
     ws.onclose = () => {
       connected.value = false
       ws = null
-      // Reconnect using fresh token from store
+      failCount++
+      // Stop reconnecting after 3 consecutive failures (likely invalid token)
+      if (failCount >= 3) return
       reconnectTimer = setTimeout(() => {
         const freshToken = getTokenFn ? getTokenFn() : null
         if (freshToken) connect(freshToken)
@@ -52,7 +58,8 @@ export function useWebSocket() {
     }
 
     // Keepalive ping every 25 seconds
-    const pingInterval = setInterval(() => {
+    if (pingInterval) clearInterval(pingInterval)
+    pingInterval = setInterval(() => {
       if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send('ping')
       } else {
@@ -63,6 +70,10 @@ export function useWebSocket() {
 
   function disconnect() {
     getTokenFn = null
+    if (pingInterval) {
+      clearInterval(pingInterval)
+      pingInterval = null
+    }
     if (reconnectTimer) {
       clearTimeout(reconnectTimer)
       reconnectTimer = null
@@ -107,6 +118,14 @@ export function useWebSocket() {
 
       case 'log':
         // Could be used for a log panel in the future
+        break
+
+      case 'aco_payment_ready':
+        // Auto-open payment page in new tab
+        if (msg.data.checkout_url) {
+          window.open(msg.data.checkout_url, '_blank')
+        }
+        cartStore.fetchCarts()
         break
 
       case 'ping':

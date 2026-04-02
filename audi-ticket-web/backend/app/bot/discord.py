@@ -22,7 +22,7 @@ _worker_task: asyncio.Task = None
 def _get_queue() -> asyncio.Queue:
     global _message_queue
     if _message_queue is None:
-        _message_queue = asyncio.Queue()
+        _message_queue = asyncio.Queue(maxsize=100)
     return _message_queue
 
 
@@ -88,7 +88,11 @@ async def _send_now(message_data: dict) -> bool:
 async def send_discord_message(message_data: dict):
     """Queue a message for delivery (rate-limit safe)."""
     await _ensure_worker()
-    _get_queue().put_nowait(message_data)
+    queue = _get_queue()
+    if queue.full():
+        logger.warning("Discord queue full, dropping message")
+        return
+    queue.put_nowait(message_data)
 
 
 async def send_discord_notification(data: Dict[str, Any], product_url: str):
@@ -164,3 +168,34 @@ async def send_discord_cart_success(
     }
 
     await send_discord_message(message)
+
+
+async def send_discord_aco_update(product_url: str, status: str, detail: str):
+    """Send ACO status update to Discord."""
+    colors = {
+        "payment_ready": 255,     # Blue
+        "3ds_waiting": 16776960,  # Yellow
+        "completed": 65280,       # Green
+        "failed": 16711680,       # Red
+    }
+    titles = {
+        "payment_ready": "💳 Payment Ready — Complete Checkout",
+        "3ds_waiting": "🔐 3DS Verification Required",
+        "completed": "🎉 Order Confirmed!",
+        "failed": "❌ Checkout Failed",
+    }
+
+    msg = {
+        "username": "Audi Ticket Bot",
+        "embeds": [{
+            "title": titles.get(status, f"ACO: {status}"),
+            "color": colors.get(status, 65280),
+            "timestamp": datetime.utcnow().isoformat(),
+            "description": (
+                f"**Product**\n{product_url}\n\n"
+                f"**Status**\n{detail}"
+            ),
+        }]
+    }
+
+    await send_discord_message(msg)

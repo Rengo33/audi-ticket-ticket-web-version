@@ -14,11 +14,12 @@ from urllib.parse import quote
 
 from sqlalchemy.orm import Session
 
-from ..models import Task, TaskStatus, CartSession, TaskLog
+from ..models import Task, TaskStatus, CartSession, TaskLog, BillingProfile
 from ..config import get_settings
 from ..database import SessionLocal
 from .core import AudiTicketBot, CookieData
-from .discord import send_discord_notification, send_discord_cart_success
+from .discord import send_discord_notification, send_discord_cart_success, send_discord_aco_update
+from .checkout import AutoCheckout
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -266,11 +267,19 @@ class AvailabilityWatcher:
             db.close()
 
     async def _handle_cart_success(self, sub: TaskSubscriber, db: Session):
-        """Handle successful cart — update status, wait, then re-activate."""
-        await self.manager._log(sub.task_id, "success",
-            "Successfully carted! Sleeping 17 min then will re-cart...", db)
-
+        """Handle successful cart — check for ACO, then wait for re-cart."""
         task = db.query(Task).filter(Task.id == sub.task_id).first()
+        auto_checkout = getattr(task, 'auto_checkout', False) if task else False
+        billing_profile_id = getattr(task, 'billing_profile_id', None) if task else None
+
+        if auto_checkout and billing_profile_id:
+            # ACO: run auto-checkout
+            await self._run_auto_checkout(sub, task, db)
+        else:
+            # Normal flow: just notify and wait for manual checkout
+            await self.manager._log(sub.task_id, "success",
+                "Successfully carted! Sleeping 17 min then will re-cart...", db)
+
         if task:
             task.status = TaskStatus.SUCCESS.value
             task.completed_at = datetime.utcnow()
@@ -305,6 +314,102 @@ class AvailabilityWatcher:
         sub.previous_data = None
 
         asyncio.create_task(self._reactivate_after_wait(sub, cart_hold - 3))
+
+    async def _run_auto_checkout(self, sub: TaskSubscriber, task: Task, db: Session):
+        """Run the full auto-checkout flow after successful ATC."""
+        profile = db.query(BillingProfile).filter(BillingProfile.id == task.billing_profile_id).first()
+        if not profile:
+            await self.manager._log(sub.task_id, "error", "ACO: Billing profile not found", db)
+            return
+
+        # Get only pending, non-expired cart sessions from this cart cycle
+        now = datetime.utcnow()
+        carts = db.query(CartSession).filter(
+            CartSession.task_id == sub.task_id,
+            CartSession.checkout_status == "pending",
+            CartSession.expires_at > now
+        ).order_by(CartSession.created_at.desc()).all()
+
+        if not carts:
+            await self.manager._log(sub.task_id, "error", "ACO: No pending cart sessions found", db)
+            return
+
+        await self.manager._log(sub.task_id, "info",
+            f"ACO: Processing {len(carts)} cart(s) with profile '{profile.name}'...", db)
+
+        for i, cart in enumerate(carts):
+            if i > 0:
+                await self.manager._log(sub.task_id, "info", "ACO: Waiting 15s before next checkout...", db)
+                await asyncio.sleep(15)
+
+            await self.manager._log(sub.task_id, "info",
+                f"ACO: Checkout {i+1}/{len(carts)} (cart {cart.id})...", db)
+
+            await self._run_single_checkout(sub, cart, profile, db)
+
+    async def _run_single_checkout(self, sub, cart, profile, db):
+        """Run ACO for a single cart session."""
+        async with AutoCheckout(cart.cookie_name, cart.cookie_value) as aco:
+            # Step 1: Submit billing
+            result = await aco.submit_billing(profile)
+            if not result.success:
+                await self.manager._log(sub.task_id, "error", f"ACO: Billing failed: {result.message}", db)
+                cart.checkout_status = "failed"
+                cart.checkout_error = result.message
+                db.commit()
+                await send_discord_aco_update(sub.product_url, "failed", f"Cart {cart.id}: {result.message}")
+                return
+
+            await self.manager._log(sub.task_id, "info", f"ACO: Billing submitted. PI: {result.payment_intent_id}", db)
+            cart.checkout_status = "billing_done"
+            cart.payment_intent_id = result.payment_intent_id
+            cart.client_secret = result.client_secret
+            db.commit()
+
+            # Step 2: Confirm payment via browser
+            pi_id = result.payment_intent_id
+            client_secret = result.client_secret
+
+            await self.manager._log(sub.task_id, "info", "ACO: Confirming payment via Stripe.js browser...", db)
+            await send_discord_aco_update(sub.product_url, "3ds_waiting",
+                f"Cart {cart.id}: Payment processing — approve 3DS if prompted!")
+
+            result = await aco.confirm_payment(profile, pi_id, client_secret)
+
+            if not result.success:
+                await self.manager._log(sub.task_id, "error", f"ACO: Payment failed: {result.message}", db)
+                cart.checkout_status = "failed"
+                cart.checkout_error = result.message
+                db.commit()
+                await send_discord_aco_update(sub.product_url, "failed", f"Cart {cart.id}: {result.message}")
+                return
+
+            pm_id = result.payment_method_id
+            await self.manager._log(sub.task_id, "success", "ACO: Payment confirmed!", db)
+
+            # Step 3: Place order
+            cart.checkout_status = "payment_confirmed"
+            cart.payment_method_id = pm_id
+            db.commit()
+
+            cardholder = f"{profile.firstname} {profile.lastname}"
+            order_result = await aco.place_order(pi_id, pm_id, cardholder)
+
+            if order_result.success:
+                await self.manager._log(sub.task_id, "success", f"ACO: Cart {cart.id} — {order_result.message}", db)
+                cart.checkout_status = "completed"
+                db.commit()
+                await send_discord_aco_update(sub.product_url, "completed", f"Cart {cart.id}: Order confirmed!")
+                await self.manager.broadcast({
+                    "type": "task_update",
+                    "data": {"task_id": sub.task_id, "status": "checkout_complete"}
+                })
+            else:
+                await self.manager._log(sub.task_id, "error", f"ACO: Cart {cart.id} order failed: {order_result.message}", db)
+                cart.checkout_status = "failed"
+                cart.checkout_error = order_result.message
+                db.commit()
+                await send_discord_aco_update(sub.product_url, "failed", f"Cart {cart.id}: {order_result.message}")
 
     async def _reactivate_after_wait(self, sub: TaskSubscriber, wait_seconds: int):
         """Reactivate a subscriber after cart hold wait."""

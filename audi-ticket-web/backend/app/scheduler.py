@@ -75,6 +75,8 @@ class TaskScheduler:
                         quantity=scheduled.quantity,
                         num_threads=scheduled.num_threads,
                         price_category=scheduled.price_category or 0,
+                        auto_checkout=getattr(scheduled, 'auto_checkout', False) or False,
+                        billing_profile_id=getattr(scheduled, 'billing_profile_id', None),
                         status=TaskStatus.PENDING.value
                     )
                     db.add(task)

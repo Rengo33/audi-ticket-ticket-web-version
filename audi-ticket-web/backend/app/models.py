@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Float, DateTime, Text, Enum as SQLEnum
+from sqlalchemy import Column, Integer, String, Float, DateTime, Text, Boolean, Enum as SQLEnum
 from sqlalchemy.sql import func
 from datetime import datetime
 import enum
@@ -26,8 +26,10 @@ class Task(Base):
     product_url = Column(String(500), nullable=False)
     quantity = Column(Integer, default=1)
     num_threads = Column(Integer, default=1)
-    price_category = Column(Integer, default=0)  # 0-based index into variations list
-    
+    price_category = Column(Integer, default=0)
+    auto_checkout = Column(Boolean, default=False)
+    billing_profile_id = Column(Integer, nullable=True)
+
     # Status
     status = Column(String(20), default=TaskStatus.PENDING.value)
     scan_count = Column(Integer, default=0)
@@ -74,6 +76,13 @@ class CartSession(Base):
     price_category = Column(Integer, default=0)
     total_time = Column(Float, nullable=True)  # Detection to cart time
     
+    # ACO status
+    checkout_status = Column(String(30), default="pending")  # pending, billing_done, payment_pending, 3ds_waiting, completed, failed
+    client_secret = Column(Text, nullable=True)  # Stripe PI client secret
+    payment_intent_id = Column(String(100), nullable=True)
+    payment_method_id = Column(String(100), nullable=True)
+    checkout_error = Column(Text, nullable=True)
+
     # Timestamps
     created_at = Column(DateTime, default=func.now())
     expires_at = Column(DateTime, nullable=False)  # Cart hold expiry
@@ -108,6 +117,8 @@ class ScheduledTask(Base):
     quantity = Column(Integer, default=4)
     num_threads = Column(Integer, default=5)
     price_category = Column(Integer, default=0)
+    auto_checkout = Column(Boolean, default=False)
+    billing_profile_id = Column(Integer, nullable=True)
 
     # Schedule
     scheduled_date = Column(DateTime, nullable=False)  # Date/time when task should start (in UTC)
@@ -119,3 +130,37 @@ class ScheduledTask(Base):
     # Timestamps
     created_at = Column(DateTime, default=func.now())
     triggered_at = Column(DateTime, nullable=True)
+
+
+class BillingProfile(Base):
+    """Billing profile for auto-checkout."""
+    __tablename__ = "billing_profiles"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(100), nullable=False)  # Profile name e.g. "Leon", "Mate"
+
+    # Personal info
+    firstname = Column(String(100), nullable=False)
+    lastname = Column(String(100), nullable=False)
+    email = Column(String(200), nullable=False)
+    telephone = Column(String(50), nullable=False)
+    stammnummer = Column(String(100), nullable=False)  # Audi employee number / buyer_field_5
+    department = Column(String(200), default="")  # buyer_field_19900
+
+    # Invoice address (always required for Rechnung)
+    invoice_recipient = Column(String(200), default="")
+    invoice_company = Column(String(200), default="")
+    invoice_tax_id = Column(String(100), default="")
+    invoice_street = Column(String(300), default="")
+    invoice_postcode = Column(String(20), default="")
+    invoice_city = Column(String(100), default="")
+    invoice_country = Column(String(10), default="DE")
+
+    # Card details (encrypted with Fernet)
+    card_number_enc = Column(Text, default="")
+    card_exp_month_enc = Column(Text, default="")
+    card_exp_year_enc = Column(Text, default="")
+    card_cvc_enc = Column(Text, default="")
+    card_last4 = Column(String(4), default="")  # For display
+
+    created_at = Column(DateTime, default=func.now())

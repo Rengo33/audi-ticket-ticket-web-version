@@ -100,6 +100,20 @@
           </select>
         </div>
 
+        <div class="form-group">
+          <label class="toggle-label">
+            <input type="checkbox" v-model="scheduleAutoCheckout">
+            Auto Checkout (ACO)
+          </label>
+        </div>
+        <div class="form-group" v-if="scheduleAutoCheckout">
+          <label>Billing Profile</label>
+          <select v-model="scheduleBillingProfileId">
+            <option :value="null">-- Profil wählen --</option>
+            <option v-for="p in billingProfiles" :key="p.id" :value="p.id">{{ p.name }} ({{ p.card_last4 ? '••••' + p.card_last4 : 'keine Karte' }})</option>
+          </select>
+        </div>
+
         <div class="sale-info">
           <span class="label">Sale starts:</span>
           <span class="value">{{ formatDate(selectedGame?.sale_date) }} {{ selectedGame?.sale_time }}</span>
@@ -130,6 +144,9 @@ const selectedGame = ref(null);
 const scheduleQuantity = ref(4);
 const scheduleThreads = ref(2);
 const schedulePriceCategory = ref(0);
+const scheduleAutoCheckout = ref(false);
+const scheduleBillingProfileId = ref(null);
+const billingProfiles = ref([]);
 
 const fetchGames = async () => {
   loading.value = true;
@@ -178,6 +195,8 @@ const scheduleGame = (game) => {
   scheduleQuantity.value = 4;
   scheduleThreads.value = 2;
   schedulePriceCategory.value = 0;
+  scheduleAutoCheckout.value = false;
+  scheduleBillingProfileId.value = null;
   showScheduleModal.value = true;
 };
 
@@ -190,7 +209,9 @@ const confirmSchedule = async () => {
       game_id: selectedGame.value.id,
       quantity: parseInt(scheduleQuantity.value),
       num_threads: parseInt(scheduleThreads.value),
-      price_category: parseInt(schedulePriceCategory.value)
+      price_category: parseInt(schedulePriceCategory.value),
+      auto_checkout: scheduleAutoCheckout.value,
+      billing_profile_id: scheduleAutoCheckout.value ? scheduleBillingProfileId.value : null
     });
 
     // Refresh games to update scheduled count
@@ -203,8 +224,13 @@ const confirmSchedule = async () => {
   }
 };
 
+const fetchBillingProfiles = async () => {
+  try { billingProfiles.value = await api.get('/api/billing/profiles'); } catch { /* ignore */ }
+};
+
 onMounted(() => {
   fetchGames();
+  fetchBillingProfiles();
 });
 </script>
 
@@ -269,6 +295,8 @@ onMounted(() => {
 .form-group { margin-bottom: 1.25rem; }
 .form-group label { display: block; font-size: 0.9rem; font-weight: 600; margin-bottom: 0.5rem; color: var(--text-primary); }
 .form-group input, .form-group select { width: 100%; padding: 12px; border: 1px solid var(--border-light); border-radius: 10px; font-size: 1rem; background: var(--input-bg); color: var(--text-primary); }
+.toggle-label { display: flex; align-items: center; gap: 8px; font-weight: 600; cursor: pointer; }
+.toggle-label input[type="checkbox"] { width: auto; }
 
 .sale-info { background: var(--hover-bg); padding: 12px; border-radius: 10px; display: flex; justify-content: space-between; margin-bottom: 1.5rem; }
 .sale-info .label { color: var(--text-tertiary); font-size: 0.85rem; }
@@ -278,23 +306,6 @@ onMounted(() => {
 .cancel-btn { background: var(--hover-bg); color: var(--text-primary); border: none; padding: 12px 20px; border-radius: 10px; font-weight: 600; cursor: pointer; }
 .confirm-btn { background: var(--btn-primary-bg); color: var(--btn-primary-text); border: none; padding: 12px 20px; border-radius: 10px; font-weight: 600; cursor: pointer; }
 .confirm-btn:disabled { opacity: 0.6; }
-
-.cancel-schedule-btn {
-  width: 100%;
-  margin-top: 8px;
-  padding: 12px;
-  background: var(--danger);
-  color: white;
-  border: none;
-  border-radius: 10px;
-  font-weight: 600;
-  cursor: pointer;
-  transition: 0.2s;
-}
-.cancel-schedule-btn:disabled {
-  opacity: 0.6;
-  cursor: not-allowed;
-}
 
 @media (max-width: 768px) {
   .games-grid { grid-template-columns: 1fr; }

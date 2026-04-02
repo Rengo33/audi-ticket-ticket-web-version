@@ -21,6 +21,8 @@ class TaskCreate(BaseModel):
     quantity: int = 1
     num_threads: int = 1
     price_category: int = 0
+    auto_checkout: bool = False
+    billing_profile_id: Optional[int] = None
 
 
 class TaskResponse(BaseModel):
@@ -29,6 +31,8 @@ class TaskResponse(BaseModel):
     quantity: int
     num_threads: int
     price_category: int = 0
+    auto_checkout: bool = False
+    billing_profile_id: Optional[int] = None
     status: str
     scan_count: int
     tickets_available: int = 0  # Current ticket availability
@@ -59,6 +63,7 @@ class CartSessionResponse(BaseModel):
     checkout_url: Optional[str]
     quantity: int
     price_category: int = 0
+    checkout_status: str = "pending"
     total_time: Optional[float]
     created_at: datetime
     expires_at: datetime

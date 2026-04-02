@@ -2,7 +2,7 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Install system dependencies for curl_cffi
+# Install system dependencies for curl_cffi + Playwright
 RUN apt-get update && apt-get install -y \
     curl \
     build-essential \
@@ -11,6 +11,9 @@ RUN apt-get update && apt-get install -y \
 # Copy requirements first for caching
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+
+# Install Playwright chromium
+RUN playwright install chromium && playwright install-deps chromium
 
 # Copy application
 COPY . .

@@ -9,7 +9,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .config import get_settings
 from .database import init_db
-from .api import auth, tasks, checkout, websocket, games
+from .api import auth, tasks, checkout, websocket, games, billing
 from .bot.monitor import task_manager
 from .scheduler import scheduler
 
@@ -63,6 +63,7 @@ app.add_middleware(
 app.include_router(auth.router, prefix="/api")
 app.include_router(tasks.router, prefix="/api")
 app.include_router(games.router, prefix="/api")
+app.include_router(billing.router, prefix="/api")
 app.include_router(checkout.router)
 app.include_router(websocket.router)
 

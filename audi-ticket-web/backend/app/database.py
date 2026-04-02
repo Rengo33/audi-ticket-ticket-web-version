@@ -52,3 +52,13 @@ def init_db():
     _add_column_if_missing("tasks", "price_category", "INTEGER DEFAULT 0")
     _add_column_if_missing("scheduled_tasks", "price_category", "INTEGER DEFAULT 0")
     _add_column_if_missing("cart_sessions", "price_category", "INTEGER DEFAULT 0")
+    # ACO migrations
+    _add_column_if_missing("tasks", "auto_checkout", "BOOLEAN DEFAULT 0")
+    _add_column_if_missing("tasks", "billing_profile_id", "INTEGER")
+    _add_column_if_missing("scheduled_tasks", "auto_checkout", "BOOLEAN DEFAULT 0")
+    _add_column_if_missing("scheduled_tasks", "billing_profile_id", "INTEGER")
+    _add_column_if_missing("cart_sessions", "checkout_status", "VARCHAR(30) DEFAULT 'pending'")
+    _add_column_if_missing("cart_sessions", "client_secret", "TEXT")
+    _add_column_if_missing("cart_sessions", "payment_intent_id", "VARCHAR(100)")
+    _add_column_if_missing("cart_sessions", "payment_method_id", "VARCHAR(100)")
+    _add_column_if_missing("cart_sessions", "checkout_error", "TEXT")

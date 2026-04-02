@@ -197,15 +197,24 @@ class BayernScraper:
             status = "upcoming"
             is_available = False
             today = date.today()
-            
-            if sale_date and sale_date <= today:
-                # Check if tickets are available
-                if 'ausverkauft' in html.lower() or 'sold out' in html.lower():
-                    status = "sold_out"
-                else:
-                    # Check availability endpoint
-                    is_available = await self._check_availability(url)
-                    status = "on_sale"
+            page_says_sold_out = 'ausverkauft' in html.lower() or 'sold out' in html.lower()
+
+            # Check if sale has actually started (7:00 AM German time)
+            from datetime import datetime as dt
+            from zoneinfo import ZoneInfo
+            now_german = dt.now(ZoneInfo("Europe/Berlin"))
+            sale_started = False
+            if sale_date:
+                sale_datetime = dt(sale_date.year, sale_date.month, sale_date.day, 7, 0, tzinfo=ZoneInfo("Europe/Berlin"))
+                sale_started = now_german >= sale_datetime
+
+            if sale_date and sale_started and page_says_sold_out:
+                status = "sold_out"
+            elif not sale_date and page_says_sold_out:
+                status = "sold_out"
+            elif sale_date and sale_started:
+                is_available = await self._check_availability(url)
+                status = "on_sale"
             
             return BayernGame(
                 id=game_id,
