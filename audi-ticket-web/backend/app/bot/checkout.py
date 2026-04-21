@@ -205,7 +205,7 @@ class AutoCheckout:
 
         # /v1/payment_intents/{pi}/confirm
         resp = await _stripe_confirm(pi_id, client_secret, cardholder, card)
-        logger.info(f"[ACO] stripe /confirm → {json.dumps(resp)[:400]}")
+        logger.info(f"[ACO] stripe /confirm → status={resp.get('status')} next_action={resp.get('next_action', {}).get('type')} error={(resp.get('error') or {}).get('code')}")
 
         if resp.get("error"):
             err = resp["error"]
@@ -220,26 +220,15 @@ class AutoCheckout:
         status = resp.get("status")
         pm_raw = resp.get("payment_method")
         pm_id = pm_raw if isinstance(pm_raw, str) else ((pm_raw or {}).get("id") or "")
-        final_pi: dict | None = resp
 
-        # 3DS branch — tell Stripe to run ACS authenticate, then poll for terminal state
+        # 3DS branch: the pure-HTTP 3DS2 handshake requires Device Data Collection
+        # against the issuer's ACS, which only works from a browser context. Raise
+        # so confirm_payment falls back to Playwright — it handles all 3DS variants
+        # (fingerprint + challenge, frictionless) via Stripe.js.
         if status in ("requires_action", "requires_source_action"):
-            na = resp.get("next_action") or {}
-            if na.get("type") in ("use_stripe_sdk", "stripe_3ds2_fingerprint"):
-                usk = na.get("use_stripe_sdk") or {}
-                source = usk.get("three_d_secure_2_source") or usk.get("source")
-                if not source:
-                    raise RuntimeError(f"3DS required but no source: {usk}")
-                logger.info(f"[ACO] 3DS required — source={source}, pushing to issuer")
-                auth = await _stripe_3ds2_authenticate(source)
-                logger.info(f"[ACO] 3ds2/authenticate → {json.dumps(auth)[:400]}")
-            else:
-                raise RuntimeError(f"Unknown next_action.type={na.get('type')}: {na}")
-
-            final_pi = await _stripe_poll_pi(pi_id, client_secret, timeout_s=180)
-            status = (final_pi or {}).get("status")
-            pm_raw = (final_pi or {}).get("payment_method") or pm_raw
-            pm_id = pm_raw if isinstance(pm_raw, str) else ((pm_raw or {}).get("id") or pm_id)
+            na_type = (resp.get("next_action") or {}).get("type")
+            usk_type = ((resp.get("next_action") or {}).get("use_stripe_sdk") or {}).get("type")
+            raise RuntimeError(f"3DS required (next_action={na_type}/{usk_type}) — pure-HTTP does not yet support the ACS handshake; falling back to Playwright")
 
         if status in ("succeeded", "requires_capture"):
             logger.info(f"[ACO] HTTP confirm success: status={status} pm={pm_id}")
@@ -251,7 +240,7 @@ class AutoCheckout:
                 client_secret=client_secret,
             )
 
-        err = (final_pi or {}).get("last_payment_error") or {}
+        err = resp.get("last_payment_error") or {}
         msg = err.get("message") or f"Unexpected status: {status}"
         return CheckoutResult(
             success=False,

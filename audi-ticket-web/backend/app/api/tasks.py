@@ -42,7 +42,11 @@ async def create_task(
     db.add(task)
     db.commit()
     db.refresh(task)
-    
+
+    # SQLite stored billing_profile_id as int (column is String but affinity is
+    # loose); response_model expects str, so coerce before returning.
+    if task.billing_profile_id is not None:
+        task.billing_profile_id = str(task.billing_profile_id)
     return task
 
 
@@ -67,7 +71,7 @@ async def list_tasks(
             "num_threads": task.num_threads,
             "price_category": task.price_category or 0,
             "auto_checkout": getattr(task, 'auto_checkout', False) or False,
-            "billing_profile_id": getattr(task, 'billing_profile_id', None),
+            "billing_profile_id": str(task.billing_profile_id) if task.billing_profile_id else None,
             "status": task.status,
             "scan_count": task.scan_count,
             "tickets_available": task.tickets_available or 0,
@@ -104,6 +108,8 @@ async def get_task(
     task = db.query(Task).filter(Task.id == task_id).first()
     if not task:
         raise HTTPException(404, "Task not found")
+    if task.billing_profile_id is not None:
+        task.billing_profile_id = str(task.billing_profile_id)
     return task
 
 
