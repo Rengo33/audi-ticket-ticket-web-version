@@ -149,21 +149,17 @@ async def send_discord_cart_success(
         "username": "Audi Ticket Bot",
         "embeds": [{
             "title": "✅ Added to Cart!",
-            "color": 65280,  # Green
+            "color": 65280,
             "timestamp": datetime.utcnow().isoformat(),
             "description": (
-                f"**Website**\nAudi Tickets\n\n"
                 f"**Product**\n{product_url}\n\n"
                 f"**Quantity**\n{quantity}\n\n"
                 f"**Price Category**\n{cat_label}\n\n"
                 f"**Speed**\n{total_time:.2f}s\n\n"
                 f"**Cookie**\n`{cookie.value}`\n\n"
-                f"**Console Script**\n```\ndocument.cookie='{cookie.name}={cookie.value};path=/;domain=.audidefuehrungen2.regiondo.de';location.href='https://audidefuehrungen2.regiondo.de/checkout/cart'\n```\n\n"
-                f"**📱 Checkout Page**\n[Checkout Helper]({checkout_link})"
+                f"**📱 Checkout**\n[Open proxy]({checkout_link})"
             ),
-            "footer": {
-                "text": f"Token: {checkout_token[:8]}..."
-            }
+            "footer": {"text": f"Token: {checkout_token[:8]}..."}
         }]
     }
 

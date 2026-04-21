@@ -249,18 +249,16 @@ class AudiTicketBot:
                     
                     logger.info(f"[ATC] Quote Item IDs: {quote_item_ids}, Qty: {quote_item_qtys}")
                     
-                    # If we have a quote item ID and quantity, verify by visiting checkout
+                    # Verify cart is real (phantom carts happen under load)
                     if quote_item_ids and quote_item_qtys and int(quote_item_qtys) > 0:
-                        # Verify cart is valid by checking the checkout page (same session!)
                         cart_valid = await self._verify_cart_at_checkout(checkout_url)
-                        
                         if cart_valid:
-                            logger.info(f"[ATC] SUCCESS! Cart verified at checkout with {quote_item_qtys} items")
+                            logger.info(f"[ATC] SUCCESS! Cart verified with {quote_item_qtys} items")
                             cookie = self._extract_session_cookie()
                             return True, cookie, None
                         else:
-                            logger.warning(f"[ATC] Cart verification failed - phantom cart detected!")
-                            return False, None, "Cart not valid at checkout (phantom cart)"
+                            logger.warning(f"[ATC] Phantom cart detected!")
+                            return False, None, "Phantom cart"
                     else:
                         # No quote item ID means nothing was added
                         logger.warning(f"[ATC] No quote item ID/qty returned - cart may be invalid!")
@@ -366,88 +364,6 @@ class AudiTicketBot:
         except Exception as e:
             logger.error(f"[Cart Verify] Exception: {e}")
             return False
-    
-    async def _verify_cart_contents(self) -> Tuple[bool, int]:
-        """
-        Verify that the cart actually contains items.
-        
-        Returns:
-            Tuple of (is_valid, item_count)
-        """
-        cart_url = f"{self.BASE_URL}/checkout/cart/"
-        
-        try:
-            response = await self.session.get(cart_url)
-            
-            if response.status_code == 200:
-                html = response.text
-                # Log first 2000 chars of cart HTML for debugging
-                logger.info(f"[Cart Verify] Cart HTML (first 2000 chars): {html[:2000]}")
-                
-                soup = BeautifulSoup(html, 'html.parser')
-                
-                # Look for cart items - check for empty cart message
-                empty_cart = soup.find('p', class_='empty')
-                if empty_cart and 'leer' in empty_cart.get_text().lower():
-                    logger.info("[Cart Verify] Cart is empty (found empty message)")
-                    return False, 0
-                
-                # Also check for "Ihr Warenkorb ist leer" text
-                if 'Ihr Warenkorb ist leer' in html:
-                    logger.info("[Cart Verify] Cart is empty (found 'Warenkorb ist leer')")
-                    return False, 0
-                
-                # Count cart items - try multiple selectors
-                cart_items = soup.find_all('tr', class_='cart-item')
-                logger.info(f"[Cart Verify] Selector 'tr.cart-item' found: {len(cart_items)}")
-                
-                if not cart_items:
-                    cart_items = soup.find_all('tr', {'data-item-id': True})
-                    logger.info(f"[Cart Verify] Selector 'tr[data-item-id]' found: {len(cart_items)}")
-                
-                if not cart_items:
-                    # Try finding any table rows in the cart body
-                    cart_table = soup.find('table', class_='cart-table')
-                    if cart_table:
-                        cart_items = cart_table.find_all('tr')
-                        logger.info(f"[Cart Verify] Selector 'table.cart-table tr' found: {len(cart_items)}")
-                
-                # Try finding by item class
-                if not cart_items:
-                    cart_items = soup.find_all(class_='item')
-                    logger.info(f"[Cart Verify] Selector '.item' found: {len(cart_items)}")
-                
-                item_count = len(cart_items)
-                logger.info(f"[Cart Verify] Final item count: {item_count}")
-                
-                # Also check for quantity in the cart
-                qty_inputs = soup.find_all('input', {'class': 'qty'})
-                total_qty = 0
-                for qty_input in qty_inputs:
-                    try:
-                        total_qty += int(qty_input.get('value', 0))
-                    except:
-                        pass
-                
-                # Also try type="number" inputs
-                if total_qty == 0:
-                    qty_inputs = soup.find_all('input', {'type': 'number'})
-                    for qty_input in qty_inputs:
-                        try:
-                            total_qty += int(qty_input.get('value', 0))
-                        except:
-                            pass
-                
-                logger.info(f"[Cart Verify] Total quantity: {total_qty}")
-                
-                return item_count > 0 or total_qty > 0, total_qty
-            else:
-                logger.warning(f"[Cart Verify] Got status {response.status_code}")
-                
-        except Exception as e:
-            logger.error(f"[Cart Verify] Error: {e}")
-        
-        return False, 0
     
     def parse_availability_data(self, data: Dict[str, Any]) -> list[TicketInfo]:
         """Parse availability data into TicketInfo objects."""

@@ -31,6 +31,7 @@ class CheckoutResult:
     payment_intent_id: str = ""
     payment_method_id: str = ""
     client_secret: str = ""
+    order_url: str = ""
 
 
 class AutoCheckout:
@@ -172,8 +173,8 @@ class AutoCheckout:
                                         else if (typeof data.payment_method === 'string') pmId = data.payment_method;
 
                                         if (status === 'requires_action' || status === 'requires_source_action') {{
-                                            // 3DS required — handleCardAction waits for user to approve on phone
-                                            var actionResult = await stripe.handleCardAction(data.client_secret);
+                                            // 3DS required — confirmCardPayment handles 3DS challenge
+                                            var actionResult = await stripe.confirmCardPayment(data.client_secret);
                                             if (actionResult.error) {{
                                                 resolve({{ success: false, error: actionResult.error.message, code: '3ds_failed' }});
                                             }} else {{

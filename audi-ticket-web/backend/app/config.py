@@ -22,7 +22,11 @@ class Settings(BaseSettings):
 
     # Base URL for external links (checkout, Discord messages)
     base_url: str = "http://localhost"
-    
+
+    # Upstream Audi site — single source of truth for all bot components
+    audi_base_url: str = "https://audidefuehrungen2.regiondo.de"
+    audi_host: str = "audidefuehrungen2.regiondo.de"
+
     # Bot Settings
     default_scan_interval: float = 1.0  # seconds
     cart_hold_time: int = 1020  # 17 minutes in seconds

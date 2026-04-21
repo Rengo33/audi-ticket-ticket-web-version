@@ -53,23 +53,18 @@
         </div>
 
         <div class="cart-actions">
-          <button @click="copyScript(cart)" class="btn btn-ghost">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
-            <span>Script</span>
-          </button>
           <button @click="copyCookie(cart)" class="btn btn-ghost">
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M21 10c-.5-3-2.7-5.3-5.5-6A9 9 0 1 0 21 14c0-.5 0-1 0-1.5-.5.5-1.5 1-2.5 1s-2-1-2-2c0-.8-.5-1.5-1.5-1.5S12 9.5 12 10.5c0 .8-.5 1.5-1.5 1.5S9 11.3 9 10.5"/></svg>
-            <span>Cookie</span>
+            <span>Copy cookie</span>
           </button>
           <a :href="getCheckoutUrl(cart)" target="_blank" rel="noopener" class="btn btn-primary cart-cta">
-            Checkout
+            Open checkout
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M7 17L17 7M7 7h10v10"/></svg>
           </a>
         </div>
       </article>
     </div>
 
-    <!-- Toast -->
     <transition name="toast">
       <div v-if="toastMessage" class="toast mono">{{ toastMessage }}</div>
     </transition>
@@ -82,21 +77,7 @@ import { useCartStore } from '../stores/cart';
 import { priceCategoryLabel } from '../constants';
 
 const cartStore = useCartStore();
-const cookieCache = new Map();
 const toastMessage = ref('');
-
-const prefetchCookies = async () => {
-  await Promise.all(cartStore.validCarts.map(async (cart) => {
-    if (cookieCache.has(cart.token)) return;
-    try {
-      const resp = await fetch(`/api/checkout/${cart.token}/cookie`);
-      if (resp.ok) cookieCache.set(cart.token, await resp.json());
-    } catch { /* ignore */ }
-  }));
-  // Evict entries for carts that no longer exist
-  const live = new Set(cartStore.validCarts.map(c => c.token));
-  for (const token of cookieCache.keys()) if (!live.has(token)) cookieCache.delete(token);
-};
 
 const getDisplayName = (url) => {
   try {
@@ -110,6 +91,11 @@ const getDisplayName = (url) => {
 
 const getCheckoutUrl = (cart) => cart.token ? `/checkout/${cart.token}/cart` : '#';
 
+const flash = (msg) => {
+  toastMessage.value = msg;
+  setTimeout(() => { toastMessage.value = ''; }, 1800);
+};
+
 const copyToClipboard = (text) => {
   if (navigator.clipboard && window.isSecureContext) {
     navigator.clipboard.writeText(text);
@@ -118,24 +104,16 @@ const copyToClipboard = (text) => {
   window.prompt('Cmd+C / Ctrl+C to copy:', text);
 };
 
-const copyScript = (cart) => {
-  const data = cookieCache.get(cart.token);
-  if (!data) { flash('Loading… try again'); prefetchCookies(); return; }
-  const script = `document.cookie='${data.name}=${data.value};path=/;domain=.audidefuehrungen2.regiondo.de';location.href='${data.checkout_url}'`;
-  copyToClipboard(script);
-  flash('Script copied');
-};
-
-const copyCookie = (cart) => {
-  const data = cookieCache.get(cart.token);
-  if (!data) { flash('Loading… try again'); prefetchCookies(); return; }
-  copyToClipboard(data.value);
-  flash('Cookie copied');
-};
-
-const flash = (msg) => {
-  toastMessage.value = msg;
-  setTimeout(() => { toastMessage.value = ''; }, 1800);
+const copyCookie = async (cart) => {
+  try {
+    const resp = await fetch(`/api/checkout/${cart.token}/cookie`);
+    if (!resp.ok) { flash('Could not fetch cookie'); return; }
+    const data = await resp.json();
+    copyToClipboard(data.value);
+    flash('Cookie copied');
+  } catch {
+    flash('Error copying cookie');
+  }
 };
 
 // These helpers all touch cartStore.tick so the template re-evaluates each
@@ -162,7 +140,6 @@ const getProgress = (expiryDate) => {
 let timer;
 onMounted(async () => {
   await cartStore.fetchCarts();
-  prefetchCookies();
   timer = setInterval(() => { cartStore.triggerUpdate(); }, 1000);
 });
 onUnmounted(() => { if (timer) clearInterval(timer); });
@@ -266,16 +243,12 @@ onUnmounted(() => { if (timer) clearInterval(timer); });
 
 .cart-actions {
   padding: 10px 12px 12px;
-  display: grid;
-  grid-template-columns: 1fr 1fr;
+  display: flex;
   gap: 6px;
   border-top: 1px solid var(--line-soft);
 }
-.cart-cta {
-  grid-column: 1 / -1;
-  height: 44px;
-}
-.cart-actions .btn { height: 38px; padding: 0 10px; font-size: 0.8125rem; }
+.cart-actions .btn { height: 40px; font-size: 0.8125rem; flex: 1; }
+.cart-cta { flex: 2; }
 
 .spinner {
   width: 18px; height: 18px;
@@ -286,7 +259,6 @@ onUnmounted(() => { if (timer) clearInterval(timer); });
 }
 @keyframes spin { to { transform: rotate(360deg); } }
 
-/* Toast */
 .toast {
   position: fixed;
   bottom: calc(80px + var(--safe-b));
