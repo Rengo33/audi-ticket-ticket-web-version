@@ -79,110 +79,12 @@ _REWRITE_RE = re.compile(
 
 
 def rewrite_html_for_proxy(html: str, token: str) -> str:
-    """Rewrite upstream URLs + inject a Stripe Elements shim on payment pages."""
+    """Rewrite upstream URLs to route back through the proxy."""
     proxy = f"/checkout/{token}/proxy/"
     html = _REWRITE_RE.sub(proxy, html)
-
-    # Inject a <base> so stragglers resolve through the proxy.
     if "<head>" in html and "<base " not in html:
         html = html.replace("<head>", f'<head><base href="{proxy}">', 1)
-
-    # Stripe shim only makes sense on checkout pages.
-    if "cryozonic_stripe" in html or "checkoutsimple" in html:
-        html = _inject_stripe_shim(html, token)
     return html
-
-
-def _inject_stripe_shim(html: str, token: str) -> str:
-    if "</body>" not in html:
-        return html
-    shim = _STRIPE_SHIM.replace("__TOKEN__", token)
-    return html.replace("</body>", shim + "</body>", 1)
-
-
-_STRIPE_SHIM = """
-<script src="https://js.stripe.com/v3/"></script>
-<script>
-(function(){
-  var fixed = false;
-  var mo = new MutationObserver(function(){
-    if (fixed) return;
-    var cardEl = document.getElementById('cryozonic_stripe_cc_num');
-    if (!cardEl) return;
-    fixed = true;
-
-    var pk = (window.cryozonic && cryozonic.apiKey) || null;
-    var secret = null;
-    var m = document.body.innerHTML.match(/pi_[A-Za-z0-9_]+_secret_[A-Za-z0-9_]+/);
-    if (m) secret = m[0];
-    if (!pk || !secret) { console.log('stripe-shim: missing key/secret'); return; }
-
-    var box = cardEl.closest('.input-box') || cardEl.parentElement;
-    box.innerHTML =
-      '<div id="stripe-payment-element" style="padding:12px 0;background:#fff;border-radius:4px"></div>' +
-      '<div id="stripe-errors" style="color:#ff3b30;margin-top:8px;font-size:14px"></div>';
-
-    var stripe = Stripe(pk);
-    var elements = stripe.elements({ clientSecret: secret });
-    elements.create('payment').mount('#stripe-payment-element');
-
-    setTimeout(function(){
-      var btns = document.querySelectorAll('.sc-place-order-btn, .btn-checkout, [onclick*="review.save"], .button.btn-inline');
-      if (!btns.length) {
-        document.querySelectorAll('button, .button').forEach(function(b){
-          if (/kaufen|bestellen|order/i.test(b.textContent)) btns = [b];
-        });
-      }
-      btns.forEach(function(btn){
-        var n = btn.cloneNode(true);
-        n.removeAttribute('onclick');
-        btn.parentNode.replaceChild(n, btn);
-        n.addEventListener('click', function(e){
-          e.preventDefault(); e.stopPropagation();
-          n.disabled = true; n.textContent = 'Zahlung wird verarbeitet...';
-          var err = document.getElementById('stripe-errors');
-          if (err) err.textContent = '';
-          stripe.confirmPayment({
-            elements: elements,
-            confirmParams: { return_url: window.location.href },
-            redirect: 'if_required'
-          }).then(function(r){
-            if (r.error) {
-              if (err) err.textContent = r.error.message;
-              n.disabled = false; n.textContent = 'Jetzt kaufen';
-              return;
-            }
-            var body = 'payment[method]=cryozonic_stripeintent&payment[cc_stripejs_token]=' +
-              encodeURIComponent(r.paymentIntent.id + ':' + r.paymentIntent.payment_method);
-            fetch('/checkout/__TOKEN__/proxy/checkoutsimple/onepage/saveOrder/', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'X-Requested-With': 'XMLHttpRequest' },
-              body: body
-            }).then(function(res){ return res.text(); }).then(function(text){
-              try {
-                var data = JSON.parse(text);
-                if (data.success || data.redirect) {
-                  window.location.href = data.redirect || '/checkout/__TOKEN__/proxy/checkout/onepage/success/';
-                } else {
-                  if (err) err.textContent = data.error || 'Bestellung fehlgeschlagen';
-                  n.disabled = false; n.textContent = 'Jetzt kaufen';
-                }
-              } catch(_){
-                document.open(); document.write(text); document.close();
-              }
-            }).catch(function(e){
-              if (err) err.textContent = 'Netzwerkfehler: ' + e.message;
-              n.disabled = false; n.textContent = 'Jetzt kaufen';
-            });
-          });
-        });
-      });
-    }, 500);
-  });
-  mo.observe(document.body, { childList: true, subtree: true });
-})();
-</script>
-"""
 
 
 def _rewrite_json_html(body: str, token: str) -> str:
