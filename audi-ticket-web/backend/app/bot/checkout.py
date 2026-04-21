@@ -22,6 +22,44 @@ AUDI_BASE = "https://audidefuehrungen2.regiondo.de"
 # Only one headless browser checkout at a time (server memory constraint)
 _browser_lock = asyncio.Lock()
 
+# Berechtigte Gesellschaft — hardcoded to AUDI AG. Option value is stable
+# across events. Change or make per-profile if other employers ever need it.
+BERECHTIGTE_GESELLSCHAFT_AUDI_AG = "49289"
+
+# The checkout form uses different buyer_field_N IDs per event (museum uses
+# buyer_field_5 for Stammnummer, Bayern uses buyer_field_20709, etc.) and
+# some events omit the department field entirely. We scrape the form.
+_FIELD_RE = re.compile(
+    r'name="custom_field\[buyer\]\[(buyer_field_\d+)\]"(?:[^>]*placeholder="([^"]*)")?',
+    re.IGNORECASE,
+)
+_LABEL_RE = re.compile(r'<label[^>]*>([^<]{1,120})</label>')
+
+
+def _discover_buyer_fields(html: str) -> dict[str, str]:
+    """Return {purpose: buyer_field_N} for the buyer fields on the form.
+
+    purpose is one of: "stammnummer", "department", "gesellschaft". Only keys
+    for fields actually present on the page are included.
+    """
+    found: dict[str, str] = {}
+    for m in _FIELD_RE.finditer(html):
+        field_id = m.group(1)
+        placeholder = (m.group(2) or "").lower()
+
+        # Closest preceding <label> is usually the label for the input.
+        labels = _LABEL_RE.findall(html[max(0, m.start() - 600):m.start()])
+        label = labels[-1].lower() if labels else ""
+        hint = f"{label} {placeholder}"
+
+        if "stammnummer" in hint and "stammnummer" not in found:
+            found["stammnummer"] = field_id
+        elif ("abteilung" in hint or "department" in hint) and "department" not in found:
+            found["department"] = field_id
+        elif "berechtigt" in hint and "gesellschaft" not in found:
+            found["gesellschaft"] = field_id
+    return found
+
 
 @dataclass
 class CheckoutResult:
@@ -58,6 +96,9 @@ class AutoCheckout:
             if r.status_code != 200:
                 return CheckoutResult(False, "failed", f"Checkout page returned {r.status_code}")
 
+            buyer_fields = _discover_buyer_fields(r.text)
+            logger.info(f"[ACO] Discovered buyer fields: {buyer_fields}")
+
             form_data = {
                 "type": "first",
                 "skip_shipping_method": "1",
@@ -66,8 +107,6 @@ class AutoCheckout:
                 "email": profile.email,
                 "email_confirm": profile.email,
                 "telephone": profile.telephone,
-                "custom_field[buyer][buyer_field_5]": profile.stammnummer,
-                "custom_field[buyer][buyer_field_19900]": profile.department or "",
                 "is_tax_invoice_required": "on",
                 "tax_invoice_recipient_name": profile.invoice_recipient or f"{profile.firstname} {profile.lastname}",
                 "company": profile.invoice_company or "",
@@ -77,6 +116,12 @@ class AutoCheckout:
                 "city": profile.invoice_city or "",
                 "country_id": profile.invoice_country or "DE",
             }
+            if fid := buyer_fields.get("stammnummer"):
+                form_data[f"custom_field[buyer][{fid}]"] = profile.stammnummer
+            if fid := buyer_fields.get("department"):
+                form_data[f"custom_field[buyer][{fid}]"] = profile.department or ""
+            if fid := buyer_fields.get("gesellschaft"):
+                form_data[f"custom_field[buyer][{fid}]"] = BERECHTIGTE_GESELLSCHAFT_AUDI_AG
 
             r = await self.session.post(
                 f"{AUDI_BASE}/checkoutsimple/threestep/posteditaddress",
