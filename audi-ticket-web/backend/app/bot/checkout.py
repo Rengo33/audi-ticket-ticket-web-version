@@ -1,23 +1,35 @@
 """
-Auto Checkout (ACO) — server-side billing + browser-based Stripe payment.
+Auto Checkout (ACO) — server-side billing + Stripe payment.
+
+Two confirm paths:
+  * pure-HTTP via curl_cffi chrome120 impersonation (fast, no Chromium)
+  * Playwright headless Chromium (legacy, ~1 GB RAM per run)
+
+Dispatch is controlled by settings.use_pure_http_confirm. When the pure-HTTP
+path raises an exception the dispatcher falls back to Playwright so a regression
+still ends with a working checkout.
 """
 import asyncio
 import json
-import re
 import logging
+import re
+import time
+import traceback
 from dataclasses import dataclass
 from typing import Optional
 from urllib.parse import urlencode
 
 from curl_cffi.requests import AsyncSession
 
-from ..models import BillingProfile
+from ..config import get_settings
 from ..crypto import decrypt
+from ..models import BillingProfile
 
 logger = logging.getLogger(__name__)
 
 STRIPE_PK = "pk_live_0j2JVbs4TBKMV39UGD7KmTqU"
 AUDI_BASE = "https://audidefuehrungen2.regiondo.de"
+STRIPE_JS_VERSION = "stripe.js/cc947ffb8d; stripe-js-v3/cc947ffb8d; card-element"
 
 # Only one headless browser checkout at a time (server memory constraint)
 _browser_lock = asyncio.Lock()
@@ -61,6 +73,15 @@ def _discover_buyer_fields(html: str) -> dict[str, str]:
     return found
 
 
+def _decrypt_card(profile: BillingProfile) -> dict[str, str]:
+    return {
+        "number": decrypt(profile.card_number_enc),
+        "exp_month": decrypt(profile.card_exp_month_enc),
+        "exp_year": decrypt(profile.card_exp_year_enc),
+        "cvc": decrypt(profile.card_cvc_enc),
+    }
+
+
 @dataclass
 class CheckoutResult:
     success: bool
@@ -73,7 +94,7 @@ class CheckoutResult:
 
 
 class AutoCheckout:
-    """Handles billing (server-side) and payment (browser-based)."""
+    """Handles billing (server-side) and payment (Stripe)."""
 
     def __init__(self, cookie_name: str, cookie_value: str):
         self.session: Optional[AsyncSession] = None
@@ -155,7 +176,96 @@ class AutoCheckout:
             return CheckoutResult(False, "failed", str(e))
 
     async def confirm_payment(self, profile: BillingProfile, pi_id: str, client_secret: str) -> CheckoutResult:
-        """Step 2: Confirm payment via headless browser (Stripe needs real browser context)."""
+        """Step 2: Confirm payment on Stripe.
+
+        Dispatches to the pure-HTTP path when settings.use_pure_http_confirm is
+        true, falling back to Playwright on any exception. Card-decision errors
+        (card_declined, incorrect_cvc, etc.) are NOT fallback conditions — they
+        are real results and are returned unchanged.
+        """
+        if get_settings().use_pure_http_confirm:
+            try:
+                logger.info("[ACO] confirm: pure-HTTP path")
+                return await self._confirm_http(profile, pi_id, client_secret)
+            except Exception as e:
+                logger.warning(f"[ACO] pure-HTTP confirm failed, falling back to Playwright: {type(e).__name__}: {e}")
+                logger.warning(traceback.format_exc())
+        else:
+            logger.info("[ACO] confirm: Playwright path (flag off)")
+        return await self._confirm_playwright(profile, pi_id, client_secret)
+
+    # ------------------------------------------------------------------
+    # Pure-HTTP confirm path
+    # ------------------------------------------------------------------
+    async def _confirm_http(self, profile: BillingProfile, pi_id: str, client_secret: str) -> CheckoutResult:
+        card = _decrypt_card(profile)
+        if not card["number"]:
+            raise RuntimeError("No card details in profile")
+        cardholder = f"{profile.firstname} {profile.lastname}"
+
+        # /v1/payment_intents/{pi}/confirm
+        resp = await _stripe_confirm(pi_id, client_secret, cardholder, card)
+        logger.info(f"[ACO] stripe /confirm → {json.dumps(resp)[:400]}")
+
+        if resp.get("error"):
+            err = resp["error"]
+            return CheckoutResult(
+                success=False,
+                status="failed",
+                message=err.get("message", "Card error"),
+                payment_intent_id=pi_id,
+                client_secret=client_secret,
+            )
+
+        status = resp.get("status")
+        pm_raw = resp.get("payment_method")
+        pm_id = pm_raw if isinstance(pm_raw, str) else ((pm_raw or {}).get("id") or "")
+        final_pi: dict | None = resp
+
+        # 3DS branch — tell Stripe to run ACS authenticate, then poll for terminal state
+        if status in ("requires_action", "requires_source_action"):
+            na = resp.get("next_action") or {}
+            if na.get("type") in ("use_stripe_sdk", "stripe_3ds2_fingerprint"):
+                usk = na.get("use_stripe_sdk") or {}
+                source = usk.get("three_d_secure_2_source") or usk.get("source")
+                if not source:
+                    raise RuntimeError(f"3DS required but no source: {usk}")
+                logger.info(f"[ACO] 3DS required — source={source}, pushing to issuer")
+                auth = await _stripe_3ds2_authenticate(source)
+                logger.info(f"[ACO] 3ds2/authenticate → {json.dumps(auth)[:400]}")
+            else:
+                raise RuntimeError(f"Unknown next_action.type={na.get('type')}: {na}")
+
+            final_pi = await _stripe_poll_pi(pi_id, client_secret, timeout_s=180)
+            status = (final_pi or {}).get("status")
+            pm_raw = (final_pi or {}).get("payment_method") or pm_raw
+            pm_id = pm_raw if isinstance(pm_raw, str) else ((pm_raw or {}).get("id") or pm_id)
+
+        if status in ("succeeded", "requires_capture"):
+            logger.info(f"[ACO] HTTP confirm success: status={status} pm={pm_id}")
+            return CheckoutResult(
+                success=True,
+                status="payment_confirmed",
+                payment_intent_id=pi_id,
+                payment_method_id=pm_id,
+                client_secret=client_secret,
+            )
+
+        err = (final_pi or {}).get("last_payment_error") or {}
+        msg = err.get("message") or f"Unexpected status: {status}"
+        return CheckoutResult(
+            success=False,
+            status="failed",
+            message=msg,
+            payment_intent_id=pi_id,
+            payment_method_id=pm_id,
+            client_secret=client_secret,
+        )
+
+    # ------------------------------------------------------------------
+    # Playwright confirm path (fallback / legacy)
+    # ------------------------------------------------------------------
+    async def _confirm_playwright(self, profile: BillingProfile, pi_id: str, client_secret: str) -> CheckoutResult:
         try:
             card_number = decrypt(profile.card_number_enc)
             card_cvc = decrypt(profile.card_cvc_enc)
@@ -263,7 +373,6 @@ class AutoCheckout:
 
         except Exception as e:
             logger.error(f"[ACO] Payment error: {e}")
-            import traceback
             logger.error(traceback.format_exc())
             return CheckoutResult(False, "failed", str(e))
 
@@ -305,3 +414,77 @@ class AutoCheckout:
         except Exception as e:
             logger.error(f"[ACO] SaveOrder error: {e}")
             return CheckoutResult(False, "failed", str(e))
+
+
+# ------------------------------------------------------------------
+# Module-level Stripe HTTP helpers.
+# Each raises on infrastructure errors so the dispatcher falls back to
+# Playwright. Card-decision responses (4xx with error body) are returned
+# as normal JSON for the caller to interpret.
+# ------------------------------------------------------------------
+async def _stripe_confirm(pi_id: str, client_secret: str, cardholder: str, card: dict) -> dict:
+    body = {
+        "payment_method_data[type]": "card",
+        "payment_method_data[card][number]": card["number"],
+        "payment_method_data[card][exp_month]": card["exp_month"],
+        "payment_method_data[card][exp_year]": card["exp_year"],
+        "payment_method_data[card][cvc]": card["cvc"],
+        "payment_method_data[billing_details][name]": cardholder,
+        "payment_method_data[referrer]": AUDI_BASE,
+        "payment_method_data[payment_user_agent]": STRIPE_JS_VERSION,
+        "payment_method_data[time_on_page]": "30000",
+        "expected_payment_method_type": "card",
+        "use_stripe_sdk": "true",
+        "key": STRIPE_PK,
+        "client_secret": client_secret,
+    }
+    async with AsyncSession(impersonate="chrome120") as s:
+        r = await s.post(
+            f"https://api.stripe.com/v1/payment_intents/{pi_id}/confirm",
+            data=urlencode(body),
+            headers={
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Origin": "https://js.stripe.com",
+                "Referer": "https://js.stripe.com/",
+            },
+            timeout=20,
+        )
+    return r.json()
+
+
+async def _stripe_3ds2_authenticate(source: str) -> dict:
+    body = {"source": source, "key": STRIPE_PK, "is_stripe_sdk": "true"}
+    async with AsyncSession(impersonate="chrome120") as s:
+        r = await s.post(
+            "https://api.stripe.com/v1/3ds2/authenticate",
+            data=urlencode(body),
+            headers={
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Origin": "https://js.stripe.com",
+                "Referer": "https://js.stripe.com/",
+            },
+            timeout=20,
+        )
+    return r.json()
+
+
+async def _stripe_poll_pi(pi_id: str, client_secret: str, timeout_s: int = 180) -> dict:
+    terminal = {"succeeded", "requires_capture", "canceled", "requires_payment_method"}
+    start = time.time()
+    async with AsyncSession(impersonate="chrome120") as s:
+        last_status = None
+        while time.time() - start < timeout_s:
+            r = await s.get(
+                f"https://api.stripe.com/v1/payment_intents/{pi_id}",
+                params={"key": STRIPE_PK, "client_secret": client_secret},
+                timeout=10,
+            )
+            data = r.json()
+            status = data.get("status")
+            if status != last_status:
+                logger.info(f"[ACO] poll t={int(time.time()-start)}s status={status}")
+                last_status = status
+            if status in terminal:
+                return data
+            await asyncio.sleep(3)
+    raise TimeoutError(f"Poll timed out after {timeout_s}s, last status={last_status}")

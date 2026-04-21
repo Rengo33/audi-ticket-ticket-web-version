@@ -30,6 +30,11 @@ class Settings(BaseSettings):
     # Bot Settings
     default_scan_interval: float = 1.0  # seconds
     cart_hold_time: int = 1020  # 17 minutes in seconds
+
+    # Auto-checkout: use pure-HTTP Stripe confirm path (no Chromium).
+    # On any exception the code falls back to the Playwright path, so a regression
+    # still ends with a working checkout.
+    use_pure_http_confirm: bool = False
     
     class Config:
         env_file = ".env"
