@@ -60,8 +60,20 @@ async def list_tasks(
     """List all tasks."""
     tasks = db.query(Task).order_by(Task.created_at.desc()).offset(skip).limit(limit).all()
     total = db.query(Task).count()
-    
-    # Enrich tasks with cart tokens if available
+
+    # Single query for the latest cart token per task (covers success + waiting)
+    active_statuses = (TaskStatus.SUCCESS.value, TaskStatus.WAITING.value)
+    active_ids = [t.id for t in tasks if t.status in active_statuses]
+    cart_tokens: dict[int, str] = {}
+    if active_ids:
+        for task_id, token in (
+            db.query(CartSession.task_id, CartSession.token)
+            .filter(CartSession.task_id.in_(active_ids))
+            .order_by(CartSession.created_at.desc())
+            .all()
+        ):
+            cart_tokens.setdefault(task_id, token)
+
     task_responses = []
     for task in tasks:
         task_dict = {
@@ -82,17 +94,8 @@ async def list_tasks(
             "started_at": task.started_at,
             "completed_at": task.completed_at,
             "error_message": task.error_message,
-            "cart_token": None
+            "cart_token": cart_tokens.get(task.id),
         }
-        
-        # Get the most recent cart session for success or waiting (re-cart window)
-        if task.status in (TaskStatus.SUCCESS.value, TaskStatus.WAITING.value):
-            cart = db.query(CartSession).filter(
-                CartSession.task_id == task.id
-            ).order_by(CartSession.created_at.desc()).first()
-            if cart:
-                task_dict["cart_token"] = cart.token
-        
         task_responses.append(TaskResponse(**task_dict))
     
     return TaskListResponse(tasks=task_responses, total=total)

@@ -111,15 +111,6 @@ class AvailabilityWatcher:
                     )
                     if _consecutive_errors >= _MAX_ERRORS:
                         raise
-                    for sub in list(self.subscribers.values()):
-                        await self.manager._log(sub.task_id, "warning",
-                            f"Network error — retrying in {backoff}s ({_consecutive_errors}/{_MAX_ERRORS})", db)
-                    try:
-                        await self._bot.close_session()
-                    except Exception:
-                        pass
-                    self._bot = AudiTicketBot()
-                    await self._bot.start_session()
                     await asyncio.sleep(backoff)
                     continue
 
@@ -471,8 +462,9 @@ class AvailabilityWatcher:
                 cart.checkout_status = "completed"
                 db.commit()
                 await send_discord_aco_update(
-                    sub.product_url, "completed", f"Cart {cart.id}: {order_result.message}",
+                    sub.product_url, "completed",
                     profile_name=profile.name, profile_email=profile.email,
+                    order_ref=order_result.order_ref, cart_id=str(cart.id),
                 )
                 await self.manager.broadcast({
                     "type": "task_update",

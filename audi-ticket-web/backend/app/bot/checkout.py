@@ -102,6 +102,7 @@ class CheckoutResult:
     payment_method_id: str = ""
     client_secret: str = ""
     order_url: str = ""
+    order_ref: str = ""
 
 
 class AutoCheckout:
@@ -416,6 +417,7 @@ class AutoCheckout:
                     payment_intent_id=pi_id,
                     payment_method_id=pm_id,
                     order_url=f"{AUDI_BASE}/checkout/onepage/success",
+                    order_ref=order_ref or "",
                 )
 
             return CheckoutResult(

@@ -3,7 +3,6 @@ Discord webhook notifications with rate-limit handling.
 """
 import asyncio
 import logging
-import re
 from datetime import datetime
 from typing import Dict, Any, Optional
 
@@ -191,8 +190,9 @@ async def send_discord_cart_success(
 
 
 async def send_discord_aco_update(
-    product_url: str, status: str, detail: str,
+    product_url: str, status: str, detail: str = "",
     profile_name: str = "", profile_email: str = "",
+    order_ref: str = "", cart_id: str = "",
 ):
     """Send ACO status update to Discord."""
     colors = {
@@ -214,13 +214,9 @@ async def send_discord_aco_update(
     ]
 
     if status == "completed":
-        ref_m = re.search(r'#(\d+)', detail) or re.search(r'(\d{8,})', detail)
-        order_ref = ref_m.group(1) if ref_m else "unknown"
-        cart_m = re.search(r'Cart (\d+)', detail)
-        cart_id = cart_m.group(1) if cart_m else "?"
         extra = [
-            _field("Order Ref", f"`#{order_ref}`"),
-            _field("Cart",      f"#{cart_id}"),
+            _field("Order Ref", f"`#{order_ref or 'unknown'}`"),
+            *([_field("Cart",    f"#{cart_id}")] if cart_id else []),
             *([_field("Profile", profile_name)] if profile_name else []),
             *([_field("Email",   profile_email)] if profile_email else []),
         ]
