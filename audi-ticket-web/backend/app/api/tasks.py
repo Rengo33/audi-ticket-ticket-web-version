@@ -85,8 +85,8 @@ async def list_tasks(
             "cart_token": None
         }
         
-        # Get the most recent active cart session for this task
-        if task.status == TaskStatus.SUCCESS.value:
+        # Get the most recent cart session for success or waiting (re-cart window)
+        if task.status in (TaskStatus.SUCCESS.value, TaskStatus.WAITING.value):
             cart = db.query(CartSession).filter(
                 CartSession.task_id == task.id
             ).order_by(CartSession.created_at.desc()).first()

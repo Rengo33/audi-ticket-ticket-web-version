@@ -86,15 +86,42 @@ class AvailabilityWatcher:
     async def _poll_loop(self):
         """Single polling loop shared by all subscribers."""
         db = SessionLocal()
+        _prev_total = -1
+        _consecutive_errors = 0
+        _MAX_ERRORS = 5
+
         try:
             self._bot = AudiTicketBot()
             await self._bot.start_session()
 
-            _prev_total = -1
-
             while self.subscribers:
-                data = await self._bot.get_available_tickets(self.event_id, self.ticket_id)
-                self.scan_count += 1
+                try:
+                    data = await self._bot.get_available_tickets(self.event_id, self.ticket_id)
+                    self.scan_count += 1
+                    _consecutive_errors = 0
+
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    _consecutive_errors += 1
+                    backoff = min(5 * _consecutive_errors, 60)
+                    logger.warning(
+                        f"[Watcher {self.key}] Scan error #{_consecutive_errors}/{_MAX_ERRORS}: {e} "
+                        f"— retrying in {backoff}s"
+                    )
+                    if _consecutive_errors >= _MAX_ERRORS:
+                        raise
+                    for sub in list(self.subscribers.values()):
+                        await self.manager._log(sub.task_id, "warning",
+                            f"Network error — retrying in {backoff}s ({_consecutive_errors}/{_MAX_ERRORS})", db)
+                    try:
+                        await self._bot.close_session()
+                    except Exception:
+                        pass
+                    self._bot = AudiTicketBot()
+                    await self._bot.start_session()
+                    await asyncio.sleep(backoff)
+                    continue
 
                 # Calculate total available
                 total_available = 0
@@ -146,7 +173,6 @@ class AvailabilityWatcher:
 
                 # Process availability for each subscriber
                 if data and total_available > 0:
-                    # Send Discord notification only when data changes
                     if data != self._last_discord_data:
                         self._last_discord_data = data
                         asyncio.create_task(
@@ -176,9 +202,8 @@ class AvailabilityWatcher:
             raise
         except Exception as e:
             import traceback
-            logger.error(f"[Watcher {self.key}] Error: {e}")
-            logger.error(f"[Watcher {self.key}] Traceback: {traceback.format_exc()}")
-            # Mark all subscribers as failed
+            logger.error(f"[Watcher {self.key}] Fatal error after {_consecutive_errors} retries: {e}")
+            logger.error(traceback.format_exc())
             for sub in list(self.subscribers.values()):
                 await self.manager._mark_failed(sub.task_id, str(e), db)
         finally:
@@ -186,7 +211,6 @@ class AvailabilityWatcher:
                 await self._bot.close_session()
                 self._bot = None
             db.close()
-            # Remove this watcher from the manager
             self.manager._remove_watcher(self.key)
 
     async def _handle_availability(self, sub: TaskSubscriber, data: dict):
@@ -570,6 +594,7 @@ class TaskManager:
     async def _setup_task(self, task_id: int, product_url: str, quantity: int, num_threads: int, price_category: int):
         """Extract event IDs and subscribe to a shared watcher."""
         db = SessionLocal()
+        watcher = None
         try:
             async with AudiTicketBot() as bot:
                 await self._log(task_id, "info", f"Started monitoring: {product_url}", db)
@@ -604,24 +629,11 @@ class TaskManager:
                 self._watchers[watcher_key] = watcher
                 await self._log(task_id, "info", "Created new availability watcher", db)
 
-            # Subscribe
+            # Subscribe and start watcher
             sub = TaskSubscriber(task_id, product_url, quantity, num_threads, price_category)
             watcher.add_subscriber(sub)
             self._task_watcher_map[task_id] = watcher_key
-
-            # Start watcher if not already running
             await watcher.start()
-
-            # Keep this coroutine alive while the task is subscribed
-            # (so active_tasks[task_id] stays valid)
-            try:
-                while task_id in watcher.subscribers:
-                    await asyncio.sleep(1)
-            except asyncio.CancelledError:
-                watcher.remove_subscriber(task_id)
-                if not watcher.subscribers:
-                    await watcher.stop()
-                raise
 
         except asyncio.CancelledError:
             raise
@@ -630,8 +642,20 @@ class TaskManager:
             logger.error(f"Task {task_id} setup error: {e}")
             logger.error(traceback.format_exc())
             await self._mark_failed(task_id, str(e), db)
+            return
         finally:
-            db.close()
+            db.close()  # release connection — keep-alive loop needs no DB
+
+        # Keep this coroutine alive while the task is subscribed
+        # (so active_tasks[task_id] stays valid). No DB session held here.
+        try:
+            while task_id in watcher.subscribers:
+                await asyncio.sleep(1)
+        except asyncio.CancelledError:
+            watcher.remove_subscriber(task_id)
+            if not watcher.subscribers:
+                await watcher.stop()
+            raise
 
     async def stop_task(self, task_id: int, db: Session) -> bool:
         """Stop a running task."""
