@@ -20,9 +20,10 @@ build/
 # Logs
 *.log
 
-# SSL Certs
+# SSL Certs + SSH keys
 certbot/
 nginx/ssl/
+*.pem
 
 # IDE
 .idea/

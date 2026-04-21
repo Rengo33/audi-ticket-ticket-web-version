@@ -1,147 +1,158 @@
 <template>
-  <div class="games-view">
-    <div class="toolbar">
-      <button @click="refreshGames" :disabled="loading" class="refresh-btn">
-        {{ loading ? 'Loading...' : '↻ Refresh' }}
+  <div>
+    <div class="view-head">
+      <div>
+        <div class="eyebrow">FC BAYERN FIXTURES</div>
+        <h1 class="view-title">Games</h1>
+      </div>
+      <button @click="fetchGames" :disabled="loading" class="btn btn-ghost">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+        <span>{{ loading ? 'Loading…' : 'Refresh' }}</span>
       </button>
     </div>
 
-    <div v-if="loading && games.length === 0" class="loading-state">
-      <div class="spinner"></div>
-      <p>Loading games...</p>
+    <div v-if="loading && games.length === 0" class="empty">
+      <div class="empty-mark is-loading"><div class="spinner"></div></div>
+      <h3>Loading fixtures</h3>
     </div>
 
-    <div v-else-if="error" class="error-state">
-      <div class="error-icon">⚠️</div>
+    <div v-else-if="error" class="empty">
+      <div class="empty-mark">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+      </div>
       <h3>Failed to load games</h3>
       <p>{{ error }}</p>
-      <button @click="refreshGames" class="retry-btn">Try Again</button>
+      <button @click="fetchGames" class="btn btn-primary" style="margin-top: 1rem;">Retry</button>
     </div>
 
-    <div v-else-if="games.length === 0" class="empty-state">
-      <div class="empty-icon">⚽</div>
-      <h3>No Games Found</h3>
+    <div v-else-if="games.length === 0" class="empty">
+      <div class="empty-mark">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="12" cy="12" r="9"/></svg>
+      </div>
+      <h3>No games found</h3>
       <p>Check back later for upcoming FC Bayern matches.</p>
     </div>
 
     <div v-else class="games-grid">
-      <div v-for="game in games" :key="game.id" class="game-card" :class="{ 'scheduled': game.is_scheduled }">
-        <div class="card-image" v-if="game.image_url">
-          <img :src="game.image_url" :alt="game.title" />
-          <div class="status-overlay" :class="game.status">
-            {{ formatStatus(game.status) }}
+      <article
+        v-for="game in games" :key="game.id"
+        class="game-card" :class="['status-' + game.status, { 'has-scheduled': game.scheduled_count > 0 }]"
+      >
+        <div class="game-media">
+          <img v-if="game.image_url" :src="game.image_url" :alt="game.title" loading="lazy" />
+          <div v-else class="game-media-fallback">
+            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="12" cy="12" r="9"/><path d="M12 3v18M3 12h18"/></svg>
           </div>
-        </div>
-        <div class="card-image placeholder" v-else>
-          <span>⚽</span>
-          <div class="status-overlay" :class="game.status">
-            {{ formatStatus(game.status) }}
-          </div>
+          <span class="game-status mono">{{ formatStatus(game.status) }}</span>
         </div>
 
-        <div class="card-body">
-          <h3>{{ game.opponent }}</h3>
-          <p class="location">{{ game.location }}</p>
+        <div class="game-body">
+          <h3 class="game-title">{{ game.opponent }}</h3>
+          <p class="game-loc mono">{{ game.location }}</p>
 
-          <div class="match-info">
-            <div class="info-item">
-              <span class="label">Match</span>
-              <span class="value">{{ formatDate(game.match_date) }} {{ game.match_time || '' }}</span>
+          <dl class="game-meta">
+            <div>
+              <dt>Match</dt>
+              <dd class="mono">{{ formatDate(game.match_date) }} · {{ game.match_time || '—' }}</dd>
             </div>
-            <div class="info-item" v-if="game.sale_date">
-              <span class="label">Sale</span>
-              <span class="value sale-date">{{ formatDate(game.sale_date) }} {{ game.sale_time || '' }}</span>
+            <div v-if="game.sale_date">
+              <dt>Sale</dt>
+              <dd class="mono is-sale">{{ formatDate(game.sale_date) }} · {{ game.sale_time || '—' }}</dd>
             </div>
-            <div class="info-item prices" v-if="game.price_categories && game.price_categories.length">
-              <span class="label">Prices</span>
-              <span class="value price-list">
-                <span v-for="(cat, i) in game.price_categories" :key="i" class="price-tag">
-                  {{ cat.name.replace('Kategorie ', 'Kat ') }}: {{ cat.price }}€
-                </span>
-              </span>
-            </div>
-          </div>
+          </dl>
         </div>
 
-        <div class="card-footer">
-          <div v-if="game.scheduled_count > 0" class="scheduled-badge">
-            {{ game.scheduled_count }} task{{ game.scheduled_count > 1 ? 's' : '' }} scheduled
-          </div>
-          <button
-            v-if="!game.is_available"
-            @click="scheduleGame(game)"
-            class="schedule-btn"
-            :disabled="scheduling === game.id"
-          >
-            {{ scheduling === game.id ? 'Scheduling...' : '+ Schedule Task' }}
-          </button>
-          <a
-            v-else
-            :href="game.url"
-            target="_blank"
-            class="buy-btn"
-          >
-            Buy Now →
+        <div class="game-foot">
+          <span v-if="game.scheduled_count > 0" class="scheduled-chip mono">
+            <span class="live-dot"></span>
+            {{ game.scheduled_count }} scheduled
+          </span>
+          <a v-if="game.is_available" :href="game.url" target="_blank" rel="noopener" class="btn btn-primary game-cta">
+            Buy now
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
           </a>
+          <button v-else @click="scheduleGame(game)" class="btn btn-primary game-cta" :disabled="scheduling === game.id">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+            <span>{{ scheduling === game.id ? 'Scheduling…' : 'Schedule' }}</span>
+          </button>
         </div>
-      </div>
+      </article>
     </div>
 
     <!-- Schedule Modal -->
+    <transition name="fade">
     <div v-if="showScheduleModal" class="modal-overlay" @click.self="showScheduleModal = false">
       <div class="modal">
-        <h3>Schedule Task</h3>
-        <p class="modal-subtitle">for {{ selectedGame?.opponent }}</p>
+        <header class="modal-header">
+          <div>
+            <div class="modal-title">Schedule task</div>
+            <div class="modal-sub">{{ selectedGame?.opponent }} · {{ selectedGame?.location }}</div>
+          </div>
+          <button @click="showScheduleModal = false" class="icon-btn" aria-label="Close">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+          </button>
+        </header>
 
-        <div class="form-group">
-          <label>Quantity</label>
-          <input v-model="scheduleQuantity" type="number" min="1" max="10">
-        </div>
-        <div class="form-group">
-          <label>Threads</label>
-          <input v-model="scheduleThreads" type="number" min="1" max="20">
-        </div>
-        <div class="form-group">
-          <label>Price Category</label>
-          <select v-model="schedulePriceCategory">
-            <option v-for="cat in PRICE_CATEGORIES" :key="cat.value" :value="cat.value">{{ cat.label }}</option>
-          </select>
-        </div>
+        <div class="modal-body">
+          <div class="sale-banner">
+            <div>
+              <div class="eyebrow">Sale starts</div>
+              <div class="sale-banner-value mono">{{ formatDate(selectedGame?.sale_date) }} · {{ selectedGame?.sale_time }}</div>
+            </div>
+          </div>
 
-        <div class="form-group">
-          <label class="toggle-label">
-            <input type="checkbox" v-model="scheduleAutoCheckout">
-            Auto Checkout (ACO)
-          </label>
-        </div>
-        <div class="form-group" v-if="scheduleAutoCheckout">
-          <label>Billing Profiles (round-robin)</label>
-          <div class="profile-checkboxes">
-            <label v-for="p in billingProfiles" :key="p.id" class="profile-check">
-              <input type="checkbox" :value="p.id" v-model="scheduleBillingProfileIds">
-              {{ p.name }} <span class="card-hint">{{ p.card_last4 ? '••••' + p.card_last4 : '' }}</span>
+          <div class="form-section">
+            <div class="form-section-title">Task</div>
+            <div class="field-row">
+              <div class="field">
+                <label class="field-label">Quantity</label>
+                <input v-model="scheduleQuantity" type="number" min="1" max="10">
+              </div>
+              <div class="field">
+                <label class="field-label">Threads</label>
+                <input v-model="scheduleThreads" type="number" min="1" max="20">
+              </div>
+            </div>
+            <div class="field">
+              <label class="field-label">Price category</label>
+              <select v-model="schedulePriceCategory">
+                <option v-for="(cat, i) in gamePriceOptions" :key="i" :value="i">{{ cat }}</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="form-section">
+            <div class="form-section-title">Auto-checkout</div>
+            <label class="check-row">
+              <input type="checkbox" v-model="scheduleAutoCheckout">
+              <span>Run ACO when tickets are carted</span>
             </label>
+            <div v-if="scheduleAutoCheckout" class="profiles-list">
+              <div class="field-label" style="margin-top: 10px;">Billing profiles <span class="field-hint">(round-robin)</span></div>
+              <label v-for="p in billingProfiles" :key="p.id" class="check-row">
+                <input type="checkbox" :value="p.id" v-model="scheduleBillingProfileIds">
+                <span class="profile-name">{{ p.name }}</span>
+                <span v-if="p.card_last4" class="mono profile-card">•••• {{ p.card_last4 }}</span>
+              </label>
+              <div v-if="billingProfiles.length === 0" class="profiles-empty mono">No profiles — add one in Billing.</div>
+            </div>
           </div>
         </div>
 
-        <div class="sale-info">
-          <span class="label">Sale starts:</span>
-          <span class="value">{{ formatDate(selectedGame?.sale_date) }} {{ selectedGame?.sale_time }}</span>
-        </div>
-
-        <div class="modal-actions">
-          <button @click="showScheduleModal = false" class="cancel-btn">Cancel</button>
-          <button @click="confirmSchedule" class="confirm-btn" :disabled="scheduling">
-            {{ scheduling ? 'Scheduling...' : 'Confirm' }}
+        <footer class="modal-footer">
+          <button @click="showScheduleModal = false" class="btn btn-ghost">Cancel</button>
+          <button @click="confirmSchedule" class="btn btn-primary" :disabled="scheduling">
+            {{ scheduling ? 'Scheduling…' : 'Confirm' }}
           </button>
-        </div>
+        </footer>
       </div>
     </div>
+    </transition>
   </div>
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue';
+import { ref, computed, onMounted } from 'vue';
 import { api } from '../stores/api';
 import { PRICE_CATEGORIES } from '../constants';
 
@@ -158,6 +169,20 @@ const scheduleAutoCheckout = ref(false);
 const scheduleBillingProfileIds = ref([]);
 const billingProfiles = ref([]);
 
+const gamePriceOptions = computed(() => {
+  const scraped = selectedGame.value?.price_categories || [];
+  const priceMap = {};
+  for (const cat of scraped) {
+    if (cat.name.includes('Block 237')) priceMap[0] = cat.price;
+    else if (cat.name.includes('Block 136')) priceMap[1] = cat.price;
+    else if (cat.name.includes('Block 328')) priceMap[2] = cat.price;
+  }
+  return PRICE_CATEGORIES.map((c, i) => {
+    const price = priceMap[i];
+    return price !== undefined ? `${c.label.split('(')[0].trim()} (${price.toFixed(2)}€)` : c.label;
+  });
+});
+
 const fetchGames = async () => {
   loading.value = true;
   error.value = null;
@@ -166,39 +191,25 @@ const fetchGames = async () => {
     games.value = response.games || response || [];
   } catch (e) {
     error.value = e.message || 'Failed to fetch games';
-    console.error('Failed to fetch games:', e);
   } finally {
     loading.value = false;
   }
 };
-
-const refreshGames = () => {
-  fetchGames();
-};
-
 const formatDate = (dateStr) => {
   if (!dateStr) return 'TBD';
   try {
-    const date = new Date(dateStr);
-    return date.toLocaleDateString('de-DE', {
-      day: '2-digit',
-      month: '2-digit',
-      year: 'numeric'
-    });
-  } catch {
-    return dateStr;
-  }
+    const s = typeof dateStr === 'string' && /^\d{4}-\d{2}-\d{2}T/.test(dateStr) && !dateStr.endsWith('Z')
+      ? dateStr + 'Z' : dateStr;
+    return new Date(s).toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit', year: '2-digit' });
+  } catch { return dateStr; }
 };
 
-const formatStatus = (status) => {
-  const statusMap = {
-    'available': 'On Sale',
-    'upcoming': 'Coming Soon',
-    'sold_out': 'Sold Out',
-    'not_available': 'Not Available'
-  };
-  return statusMap[status] || status;
-};
+const formatStatus = (status) => ({
+  'available':     'ON SALE',
+  'upcoming':      'COMING SOON',
+  'sold_out':      'SOLD OUT',
+  'not_available': 'N/A'
+}[status] || status);
 
 const scheduleGame = (game) => {
   selectedGame.value = game;
@@ -212,10 +223,9 @@ const scheduleGame = (game) => {
 
 const confirmSchedule = async () => {
   if (!selectedGame.value) return;
-
   scheduling.value = selectedGame.value.id;
   try {
-    const response = await api.post('/api/games/schedule', {
+    await api.post('/api/games/schedule', {
       game_id: selectedGame.value.id,
       quantity: parseInt(scheduleQuantity.value),
       num_threads: parseInt(scheduleThreads.value),
@@ -223,8 +233,6 @@ const confirmSchedule = async () => {
       auto_checkout: scheduleAutoCheckout.value,
       billing_profile_id: scheduleAutoCheckout.value ? scheduleBillingProfileIds.value.join(',') : null
     });
-
-    // Refresh games to update scheduled count
     await fetchGames();
     showScheduleModal.value = false;
   } catch (e) {
@@ -238,95 +246,168 @@ const fetchBillingProfiles = async () => {
   try { billingProfiles.value = await api.get('/api/billing/profiles'); } catch { /* ignore */ }
 };
 
-onMounted(() => {
-  fetchGames();
-  fetchBillingProfiles();
-});
+onMounted(() => { fetchGames(); fetchBillingProfiles(); });
 </script>
 
 <style scoped>
-.toolbar { margin-bottom: 2rem; display: flex; justify-content: flex-end; }
-.refresh-btn { background: var(--hover-bg); color: var(--text-primary); padding: 12px 24px; border-radius: 12px; font-weight: 600; cursor: pointer; border: none; transition: 0.2s; }
-.refresh-btn:hover { background: var(--border-light); }
-.refresh-btn:disabled { opacity: 0.6; cursor: not-allowed; }
+.view-head {
+  display: flex; align-items: flex-end; justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 1.5rem;
+}
+.view-title {
+  font-size: clamp(1.5rem, 4vw, 2rem);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.1;
+  margin-top: 4px;
+}
 
-.games-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 1.5rem; }
+.games-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 12px;
+}
+@media (min-width: 600px) { .games-grid { grid-template-columns: repeat(2, 1fr); gap: 16px; } }
+@media (min-width: 1100px) { .games-grid { grid-template-columns: repeat(3, 1fr); } }
 
-.game-card { background: var(--card-bg); border-radius: 16px; overflow: hidden; transition: transform 0.2s, box-shadow 0.2s; border: 1px solid var(--border-light); }
-.game-card:hover { transform: translateY(-2px); box-shadow: 0 10px 30px var(--card-shadow); }
-.game-card.scheduled { border-color: var(--success); }
+.game-card {
+  display: flex; flex-direction: column;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  transition: border-color 0.15s, transform 0.15s;
+}
+.game-card:hover { border-color: color-mix(in oklab, var(--ink) 30%, var(--line)); }
+.game-card.has-scheduled {
+  box-shadow: inset 3px 0 0 var(--ok);
+}
 
-.card-image { position: relative; height: 160px; background: linear-gradient(135deg, var(--card-image-gradient-start), var(--card-image-gradient-end)); overflow: hidden; }
-.card-image img { width: 100%; height: 100%; object-fit: cover; }
-.card-image.placeholder { display: flex; align-items: center; justify-content: center; font-size: 3rem; opacity: 0.3; }
+.game-media {
+  position: relative;
+  aspect-ratio: 16 / 9;
+  background: var(--bg-subtle);
+  overflow: hidden;
+}
+.game-media img {
+  width: 100%; height: 100%; object-fit: cover;
+  filter: saturate(1.05) contrast(1.02);
+}
+.game-media-fallback {
+  width: 100%; height: 100%;
+  display: flex; align-items: center; justify-content: center;
+  color: var(--ink-4);
+  opacity: 0.5;
+}
 
-.status-overlay { position: absolute; top: 12px; right: 12px; padding: 6px 12px; border-radius: 8px; font-size: 0.75rem; font-weight: 700; text-transform: uppercase; }
-.status-overlay.available { background: #34c759; color: white; }
-.status-overlay.upcoming { background: #ff9500; color: white; }
-.status-overlay.sold_out { background: #ff3b30; color: white; }
-.status-overlay.not_available { background: #8e8e93; color: white; }
+.game-status {
+  position: absolute;
+  top: 10px; left: 10px;
+  padding: 4px 8px;
+  font-size: 0.625rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  background: var(--surface);
+  color: var(--ink);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+}
+.status-available .game-status { background: var(--ok); color: white; border-color: transparent; }
+.status-sold_out .game-status { background: var(--bad); color: white; border-color: transparent; }
+.status-upcoming .game-status { background: var(--warn); color: white; border-color: transparent; }
 
-.card-body { padding: 1.25rem; }
-.card-body h3 { font-size: 1.15rem; font-weight: 700; margin-bottom: 4px; color: var(--text-primary); }
-.location { color: var(--text-secondary); font-size: 0.9rem; margin-bottom: 1rem; }
+.game-body { padding: 14px 14px 10px; flex: 1; display: flex; flex-direction: column; gap: 10px; }
+.game-title {
+  font-size: 1rem; font-weight: 700;
+  letter-spacing: -0.01em;
+  line-height: 1.3;
+  color: var(--ink);
+}
+.game-loc {
+  font-size: 0.75rem;
+  color: var(--ink-4);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
 
-.match-info { background: var(--stat-bg); padding: 12px; border-radius: 10px; }
-.info-item { display: flex; justify-content: space-between; align-items: center; }
-.info-item + .info-item { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border-light); }
-.info-item .label { font-size: 0.8rem; color: var(--text-tertiary); text-transform: uppercase; letter-spacing: 0.3px; }
-.info-item .value { font-size: 0.9rem; font-weight: 600; color: var(--text-primary); }
-.info-item .sale-date { color: var(--accent-blue); }
-.info-item.prices { flex-direction: column; align-items: flex-start; gap: 4px; }
-.price-list { display: flex; flex-wrap: wrap; gap: 4px; }
-.price-tag { background: var(--hover-bg); padding: 2px 8px; border-radius: 6px; font-size: 0.8rem; white-space: nowrap; }
+.game-meta { display: flex; flex-direction: column; gap: 0; margin-top: auto; }
+.game-meta > div {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 8px 0;
+  border-top: 1px solid var(--line-soft);
+}
+.game-meta dt {
+  font-family: var(--font-mono);
+  font-size: 0.625rem;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--ink-4);
+}
+.game-meta dd {
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: var(--ink);
+}
+.game-meta dd.is-sale { color: var(--signal); }
+[data-theme="dark"] .game-meta dd.is-sale { color: var(--signal); }
 
-.card-footer { padding: 0 1.25rem 1.25rem; }
+.game-foot {
+  padding: 10px 14px 14px;
+  display: flex; gap: 8px; align-items: center;
+  border-top: 1px solid var(--line-soft);
+}
+.game-cta { flex: 1; height: 42px; }
+.scheduled-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 6px 10px;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  color: var(--ok);
+  background: var(--ok-soft);
+  border-radius: 999px;
+}
 
-.schedule-btn { width: 100%; padding: 14px; background: var(--btn-primary-bg); color: var(--btn-primary-text); border: none; border-radius: 12px; font-weight: 600; cursor: pointer; transition: 0.2s; }
-.schedule-btn:hover { background: var(--btn-primary-hover); }
-.schedule-btn:disabled { opacity: 0.6; cursor: not-allowed; }
+/* Sale banner in modal */
+.sale-banner {
+  padding: 12px 14px;
+  background: var(--signal-soft);
+  border: 1px solid color-mix(in oklab, var(--signal) 40%, transparent);
+  border-radius: var(--radius);
+  margin-bottom: 14px;
+}
+.sale-banner-value {
+  font-size: 1rem;
+  font-weight: 700;
+  color: var(--ink);
+  margin-top: 2px;
+}
 
-.buy-btn { display: block; width: 100%; padding: 14px; background: var(--success); color: white; border: none; border-radius: 12px; font-weight: 600; text-align: center; text-decoration: none; transition: 0.2s; }
-.buy-btn:hover { background: #2db84d; }
+.field-hint { color: var(--ink-4); font-weight: 400; margin-left: 4px; text-transform: none; letter-spacing: 0; }
+.profiles-list { display: flex; flex-direction: column; gap: 6px; }
+.profile-name { flex: 1; }
+.profile-card { color: var(--ink-3); font-size: 0.75rem; }
+.profiles-empty {
+  padding: 12px;
+  color: var(--ink-4);
+  font-size: 0.75rem;
+  text-align: center;
+  background: var(--surface-2);
+  border: 1px dashed var(--line);
+  border-radius: var(--radius);
+}
 
-.scheduled-badge { text-align: center; padding: 14px; background: rgba(52, 199, 89, 0.1); color: var(--success); border-radius: 12px; font-weight: 600; }
-
-/* Loading & Empty States */
-.loading-state, .empty-state, .error-state { text-align: center; padding: 4rem 2rem; color: var(--text-tertiary); }
-.empty-icon, .error-icon { font-size: 3rem; margin-bottom: 1rem; opacity: 0.5; }
-.spinner { width: 40px; height: 40px; border: 3px solid var(--border-light); border-top-color: var(--text-primary); border-radius: 50%; animation: spin 1s linear infinite; margin: 0 auto 1rem; }
+.spinner {
+  width: 18px; height: 18px;
+  border: 2px solid var(--line);
+  border-top-color: var(--ink);
+  border-radius: 50%;
+  animation: spin 0.9s linear infinite;
+}
 @keyframes spin { to { transform: rotate(360deg); } }
 
-.retry-btn { margin-top: 1rem; padding: 10px 20px; background: var(--btn-primary-bg); color: var(--btn-primary-text); border: none; border-radius: 8px; cursor: pointer; }
-
-/* Modal */
-.modal-overlay { position: fixed; inset: 0; background: var(--modal-overlay); display: flex; align-items: center; justify-content: center; backdrop-filter: blur(5px); z-index: 100; }
-.modal { background: var(--card-bg); padding: 2rem; border-radius: 20px; width: 100%; max-width: 400px; box-shadow: 0 20px 40px rgba(0,0,0,0.2); }
-.modal h3 { font-size: 1.4rem; font-weight: 700; margin-bottom: 0.25rem; }
-.modal-subtitle { color: var(--text-tertiary); margin-bottom: 1.5rem; }
-
-.form-group { margin-bottom: 1.25rem; }
-.form-group label { display: block; font-size: 0.9rem; font-weight: 600; margin-bottom: 0.5rem; color: var(--text-primary); }
-.form-group input, .form-group select { width: 100%; padding: 12px; border: 1px solid var(--border-light); border-radius: 10px; font-size: 1rem; background: var(--input-bg); color: var(--text-primary); }
-.toggle-label { display: flex; align-items: center; gap: 8px; font-weight: 600; cursor: pointer; }
-.toggle-label input[type="checkbox"] { width: auto; }
-.profile-checkboxes { display: flex; flex-direction: column; gap: 6px; }
-.profile-check { display: flex; align-items: center; gap: 8px; padding: 8px 12px; background: var(--stat-bg); border-radius: 8px; cursor: pointer; font-size: 0.95rem; }
-.profile-check input[type="checkbox"] { width: auto; }
-.card-hint { color: var(--text-tertiary); font-size: 0.8rem; }
-
-.sale-info { background: var(--hover-bg); padding: 12px; border-radius: 10px; display: flex; justify-content: space-between; margin-bottom: 1.5rem; }
-.sale-info .label { color: var(--text-tertiary); font-size: 0.85rem; }
-.sale-info .value { font-weight: 600; color: var(--accent-blue); }
-
-.modal-actions { display: flex; justify-content: flex-end; gap: 1rem; }
-.cancel-btn { background: var(--hover-bg); color: var(--text-primary); border: none; padding: 12px 20px; border-radius: 10px; font-weight: 600; cursor: pointer; }
-.confirm-btn { background: var(--btn-primary-bg); color: var(--btn-primary-text); border: none; padding: 12px 20px; border-radius: 10px; font-weight: 600; cursor: pointer; }
-.confirm-btn:disabled { opacity: 0.6; }
-
-@media (max-width: 768px) {
-  .games-grid { grid-template-columns: 1fr; }
-  .card-image { height: 120px; }
-  .modal { max-width: 95vw; padding: 1.5rem; }
-}
+.fade-enter-active, .fade-leave-active { transition: opacity 0.15s; }
+.fade-enter-from, .fade-leave-to { opacity: 0; }
 </style>

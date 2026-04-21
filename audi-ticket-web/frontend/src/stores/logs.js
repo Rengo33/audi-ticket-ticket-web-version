@@ -6,9 +6,7 @@ const logs = ref([])
 export function useLogStore() {
   function addLog(entry) {
     logs.value.unshift(entry)
-    if (logs.value.length > MAX_LOGS) {
-      logs.value.length = MAX_LOGS
-    }
+    if (logs.value.length > MAX_LOGS) logs.value.length = MAX_LOGS
   }
 
   function clear() {

@@ -75,10 +75,16 @@ export const useTaskStore = defineStore('tasks', () => {
   }
   
   function updateTask(taskId, updates) {
-    const index = tasks.value.findIndex(t => t.id === taskId)
-    if (index !== -1) {
-      tasks.value.splice(index, 1, { ...tasks.value[index], ...updates })
+    const task = tasks.value.find(t => t.id === taskId)
+    if (!task) return
+    let changed = false
+    for (const key in updates) {
+      if (task[key] !== updates[key]) {
+        task[key] = updates[key]
+        changed = true
+      }
     }
+    return changed
   }
   
   return {

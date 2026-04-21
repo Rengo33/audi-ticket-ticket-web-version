@@ -1,91 +1,136 @@
 <template>
-  <div class="billing-view">
-    <div class="toolbar">
-      <button @click="showModal = true" class="primary-btn">+ New Profile</button>
+  <div>
+    <div class="view-head">
+      <div>
+        <div class="eyebrow">CHECKOUT IDENTITIES</div>
+        <h1 class="view-title">Billing</h1>
+      </div>
+      <button @click="showModal = true" class="btn btn-primary">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+        <span>New profile</span>
+      </button>
     </div>
 
-    <div v-if="profiles.length === 0" class="empty-state">
-      <div class="empty-icon">👤</div>
-      <h3>No Billing Profiles</h3>
+    <div v-if="profiles.length === 0" class="empty">
+      <div class="empty-mark">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="2.5" y="5.5" width="19" height="13" rx="2"/><path d="M2.5 10h19"/></svg>
+      </div>
+      <h3>No billing profiles</h3>
       <p>Create a profile to enable Auto Checkout.</p>
     </div>
 
     <div v-else class="profiles-grid">
-      <div v-for="p in profiles" :key="p.id" class="profile-card">
-        <div class="card-header">
-          <h3>{{ p.name }}</h3>
-          <div class="card-actions-top">
-            <button @click="editProfile(p)" class="icon-btn edit">✏️</button>
-            <button @click="deleteProfile(p.id)" class="icon-btn delete">🗑</button>
+      <article v-for="p in profiles" :key="p.id" class="profile-card">
+        <div class="profile-top">
+          <div class="profile-avatar mono">{{ initials(p.firstname, p.lastname) }}</div>
+          <div class="profile-identity">
+            <h3 class="profile-name">{{ p.name }}</h3>
+            <p class="profile-legal mono">{{ p.firstname }} {{ p.lastname }}</p>
+          </div>
+          <div class="profile-actions">
+            <button @click="editProfile(p)" class="icon-btn" aria-label="Edit">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+            </button>
+            <button @click="deleteProfile(p.id)" class="icon-btn is-danger" aria-label="Delete">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-2 14a2 2 0 0 1-2 2H9a2 2 0 0 1-2-2L5 6"/></svg>
+            </button>
           </div>
         </div>
-        <div class="card-body">
-          <div class="info-row"><span class="label">Name</span><span>{{ p.firstname }} {{ p.lastname }}</span></div>
-          <div class="info-row"><span class="label">Email</span><span>{{ p.email }}</span></div>
-          <div class="info-row"><span class="label">Stammnr.</span><span>{{ p.stammnummer }}</span></div>
-          <div class="info-row"><span class="label">Karte</span><span>{{ p.has_card ? '•••• ' + p.card_last4 : 'Keine' }}</span></div>
-          <div class="info-row"><span class="label">Rechnung</span><span>{{ p.invoice_street ? p.invoice_street + ', ' + p.invoice_city : 'Nicht gesetzt' }}</span></div>
-        </div>
-      </div>
+
+        <dl class="profile-rows">
+          <div><dt>Email</dt><dd class="mono">{{ p.email }}</dd></div>
+          <div><dt>Phone</dt><dd class="mono">{{ p.telephone || '—' }}</dd></div>
+          <div><dt>Stammnr.</dt><dd class="mono">{{ p.stammnummer || '—' }}</dd></div>
+          <div>
+            <dt>Card</dt>
+            <dd class="mono" :class="{ 'is-empty': !p.has_card }">
+              {{ p.has_card ? '•••• ' + p.card_last4 : 'not set' }}
+            </dd>
+          </div>
+          <div>
+            <dt>Invoice</dt>
+            <dd :class="{ 'is-empty mono': !p.invoice_street }">
+              {{ p.invoice_street ? p.invoice_street + ', ' + p.invoice_city : 'not set' }}
+            </dd>
+          </div>
+        </dl>
+      </article>
     </div>
 
     <!-- Modal -->
+    <transition name="fade">
     <div v-if="showModal" class="modal-overlay" @click.self="closeModal">
       <div class="modal">
-        <h3>{{ editingId ? 'Profil bearbeiten' : 'Neues Profil' }}</h3>
+        <header class="modal-header">
+          <div>
+            <div class="modal-title">{{ editingId ? 'Edit profile' : 'New profile' }}</div>
+            <div class="modal-sub">Used for Audi checkout + Stripe card tokenisation.</div>
+          </div>
+          <button @click="closeModal" class="icon-btn" aria-label="Close">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+          </button>
+        </header>
 
-        <div class="form-section">
-          <h4>Profil</h4>
-          <div class="form-group">
-            <label>Profilname</label>
-            <input v-model="form.name" placeholder="z.B. Leon, Mate">
+        <div class="modal-body">
+          <div class="form-section">
+            <div class="form-section-title">Profile</div>
+            <div class="field">
+              <label class="field-label">Name <span class="req">*</span></label>
+              <input v-model="form.name" placeholder="e.g. Leon, Mate">
+            </div>
+          </div>
+
+          <div class="form-section">
+            <div class="form-section-title">Personal</div>
+            <div class="field-row">
+              <div class="field"><label class="field-label">First <span class="req">*</span></label><input v-model="form.firstname"></div>
+              <div class="field"><label class="field-label">Last <span class="req">*</span></label><input v-model="form.lastname"></div>
+            </div>
+            <div class="field"><label class="field-label">Email <span class="req">*</span></label><input v-model="form.email" type="email" inputmode="email"></div>
+            <div class="field"><label class="field-label">Phone (incl. +49)</label><input v-model="form.telephone" type="tel" inputmode="tel" placeholder="+491721234567"></div>
+            <div class="field-row">
+              <div class="field"><label class="field-label">Stammnr. <span class="req">*</span></label><input v-model="form.stammnummer" inputmode="numeric"></div>
+              <div class="field"><label class="field-label">Dept.</label><input v-model="form.department" placeholder="Optional"></div>
+            </div>
+          </div>
+
+          <div class="form-section">
+            <div class="form-section-title">Invoice address</div>
+            <div class="field"><label class="field-label">Recipient</label><input v-model="form.invoice_recipient" placeholder="Default: first + last"></div>
+            <div class="field-row">
+              <div class="field"><label class="field-label">Company</label><input v-model="form.invoice_company" placeholder="Optional"></div>
+              <div class="field"><label class="field-label">Tax ID</label><input v-model="form.invoice_tax_id" placeholder="Optional"></div>
+            </div>
+            <div class="field"><label class="field-label">Street</label><input v-model="form.invoice_street"></div>
+            <div class="field-row">
+              <div class="field"><label class="field-label">Postcode</label><input v-model="form.invoice_postcode" inputmode="numeric"></div>
+              <div class="field"><label class="field-label">City</label><input v-model="form.invoice_city"></div>
+            </div>
+          </div>
+
+          <div class="form-section">
+            <div class="form-section-title">Card</div>
+            <div class="field">
+              <label class="field-label">Card number</label>
+              <input v-model="form.card_number" class="mono" placeholder="4165 9834 2083 0861" maxlength="19" inputmode="numeric" autocomplete="off">
+            </div>
+            <div class="field-row-3">
+              <div class="field"><label class="field-label">Month</label><input v-model="form.card_exp_month" class="mono" placeholder="MM" maxlength="2" inputmode="numeric"></div>
+              <div class="field"><label class="field-label">Year</label><input v-model="form.card_exp_year" class="mono" placeholder="YY" maxlength="2" inputmode="numeric"></div>
+              <div class="field"><label class="field-label">CVC</label><input v-model="form.card_cvc" class="mono" placeholder="•••" maxlength="4" type="password" inputmode="numeric"></div>
+            </div>
           </div>
         </div>
 
-        <div class="form-section">
-          <h4>Persönliche Daten</h4>
-          <div class="form-row">
-            <div class="form-group"><label>Vorname</label><input v-model="form.firstname"></div>
-            <div class="form-group"><label>Nachname</label><input v-model="form.lastname"></div>
-          </div>
-          <div class="form-group"><label>Email</label><input v-model="form.email" type="email"></div>
-          <div class="form-group"><label>Telefon</label><input v-model="form.telephone"></div>
-          <div class="form-row">
-            <div class="form-group"><label>Stammnummer</label><input v-model="form.stammnummer"></div>
-            <div class="form-group"><label>Abteilung</label><input v-model="form.department" placeholder="Optional"></div>
-          </div>
-        </div>
-
-        <div class="form-section">
-          <h4>Rechnungsadresse</h4>
-          <div class="form-group"><label>Empfänger</label><input v-model="form.invoice_recipient" placeholder="Optional, default: Vor- + Nachname"></div>
-          <div class="form-row">
-            <div class="form-group"><label>Firma</label><input v-model="form.invoice_company" placeholder="Optional"></div>
-            <div class="form-group"><label>Steuer-ID</label><input v-model="form.invoice_tax_id" placeholder="Optional"></div>
-          </div>
-          <div class="form-group"><label>Straße</label><input v-model="form.invoice_street"></div>
-          <div class="form-row">
-            <div class="form-group"><label>PLZ</label><input v-model="form.invoice_postcode"></div>
-            <div class="form-group"><label>Stadt</label><input v-model="form.invoice_city"></div>
-          </div>
-        </div>
-
-        <div class="form-section">
-          <h4>Kartendaten</h4>
-          <div class="form-group"><label>Kartennummer</label><input v-model="form.card_number" placeholder="4165 9834 ..." maxlength="19"></div>
-          <div class="form-row">
-            <div class="form-group"><label>Monat</label><input v-model="form.card_exp_month" placeholder="11" maxlength="2"></div>
-            <div class="form-group"><label>Jahr</label><input v-model="form.card_exp_year" placeholder="27" maxlength="2"></div>
-            <div class="form-group"><label>CVC</label><input v-model="form.card_cvc" placeholder="123" maxlength="4" type="password"></div>
-          </div>
-        </div>
-
-        <div class="modal-actions">
-          <button @click="closeModal" class="cancel-btn">Abbrechen</button>
-          <button @click="saveProfile" class="create-btn" :disabled="saving">{{ saving ? 'Speichern...' : 'Speichern' }}</button>
-        </div>
+        <footer class="modal-footer">
+          <button @click="closeModal" class="btn btn-ghost">Cancel</button>
+          <button @click="saveProfile" class="btn btn-primary" :disabled="saving">
+            {{ saving ? 'Saving…' : 'Save profile' }}
+          </button>
+        </footer>
       </div>
     </div>
+    </transition>
   </div>
 </template>
 
@@ -106,10 +151,10 @@ const emptyForm = {
 };
 const form = ref({ ...emptyForm });
 
+const initials = (first = '', last = '') => ((first[0] || '') + (last[0] || '')).toUpperCase() || '—';
+
 const fetchProfiles = async () => {
-  try {
-    profiles.value = await api.get('/api/billing/profiles');
-  } catch { /* ignore */ }
+  try { profiles.value = await api.get('/api/billing/profiles'); } catch { /* ignore */ }
 };
 
 const editProfile = (p) => {
@@ -135,32 +180,29 @@ const closeModal = () => {
 
 const saveProfile = async () => {
   if (!form.value.name || !form.value.firstname || !form.value.lastname || !form.value.email || !form.value.stammnummer) {
-    alert('Bitte alle Pflichtfelder ausfüllen (Name, Vorname, Nachname, Email, Stammnummer)');
+    alert('Please fill all required fields (Name, First, Last, Email, Stammnr.)');
     return;
   }
   saving.value = true;
   try {
-    if (editingId.value) {
-      await api.request('PUT', `/api/billing/profiles/${editingId.value}`, form.value);
-    } else {
-      await api.post('/api/billing/profiles', form.value);
-    }
+    if (editingId.value) await api.request('PUT', `/api/billing/profiles/${editingId.value}`, form.value);
+    else await api.post('/api/billing/profiles', form.value);
     await fetchProfiles();
     closeModal();
   } catch (e) {
-    alert('Fehler: ' + (e.message || 'Unknown'));
+    alert('Error: ' + (e.message || 'Unknown'));
   } finally {
     saving.value = false;
   }
 };
 
 const deleteProfile = async (id) => {
-  if (!confirm('Profil löschen?')) return;
+  if (!confirm('Delete profile?')) return;
   try {
     await api.delete(`/api/billing/profiles/${id}`);
     profiles.value = profiles.value.filter(p => p.id !== id);
   } catch (e) {
-    alert('Fehler: ' + (e.message || 'Unknown'));
+    alert('Error: ' + (e.message || 'Unknown'));
   }
 };
 
@@ -168,45 +210,95 @@ onMounted(fetchProfiles);
 </script>
 
 <style scoped>
-.billing-view { padding: 0; }
-.toolbar { margin-bottom: 2rem; display: flex; justify-content: flex-end; }
-.primary-btn { background: var(--btn-primary-bg); color: var(--btn-primary-text); padding: 12px 24px; border-radius: 12px; font-weight: 600; cursor: pointer; border: none; }
-
-.profiles-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 1.5rem; }
-
-.profile-card { background: var(--card-bg); border-radius: 16px; padding: 1.5rem; border: 1px solid var(--border-light); }
-.card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; }
-.card-header h3 { font-size: 1.2rem; font-weight: 700; }
-.card-actions-top { display: flex; gap: 4px; }
-.icon-btn { width: 36px; height: 36px; border-radius: 8px; border: none; cursor: pointer; font-size: 0.9rem; display: flex; align-items: center; justify-content: center; }
-.icon-btn.edit { background: rgba(0,122,255,0.1); }
-.icon-btn.delete { background: rgba(255,59,48,0.1); }
-
-.info-row { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid var(--border-light); font-size: 0.9rem; }
-.info-row .label { color: var(--text-tertiary); }
-
-.empty-state { text-align: center; padding: 4rem; color: var(--text-tertiary); }
-.empty-icon { font-size: 3rem; margin-bottom: 1rem; }
-
-.modal-overlay { position: fixed; inset: 0; background: var(--modal-overlay); display: flex; align-items: center; justify-content: center; backdrop-filter: blur(5px); z-index: 100; }
-.modal { background: var(--card-bg); padding: 2rem; border-radius: 20px; width: 100%; max-width: 550px; max-height: 90vh; overflow-y: auto; }
-.modal h3 { font-size: 1.5rem; font-weight: 700; margin-bottom: 1.5rem; }
-
-.form-section { margin-bottom: 1.5rem; }
-.form-section h4 { font-size: 0.85rem; font-weight: 700; color: var(--text-tertiary); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 0.75rem; }
-.form-group { margin-bottom: 0.75rem; }
-.form-group label { display: block; font-size: 0.85rem; font-weight: 600; margin-bottom: 0.3rem; }
-.form-group input { width: 100%; padding: 10px; border: 1px solid var(--border-light); border-radius: 8px; font-size: 0.95rem; background: var(--input-bg); color: var(--text-primary); }
-.form-row { display: flex; gap: 0.75rem; }
-.form-row .form-group { flex: 1; }
-
-.modal-actions { display: flex; justify-content: flex-end; gap: 1rem; margin-top: 1.5rem; }
-.cancel-btn { background: var(--hover-bg); color: var(--text-primary); border: none; padding: 12px 20px; border-radius: 10px; font-weight: 600; cursor: pointer; }
-.create-btn { background: var(--btn-primary-bg); color: var(--btn-primary-text); border: none; padding: 12px 20px; border-radius: 10px; font-weight: 600; cursor: pointer; }
-
-@media (max-width: 768px) {
-  .profiles-grid { grid-template-columns: 1fr; }
-  .modal { max-width: 95vw; padding: 1.5rem; }
-  .form-row { flex-direction: column; gap: 0; }
+.view-head {
+  display: flex; align-items: flex-end; justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 1.5rem;
 }
+.view-title {
+  font-size: clamp(1.5rem, 4vw, 2rem);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.1;
+  margin-top: 4px;
+}
+
+.profiles-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 12px;
+}
+@media (min-width: 640px) { .profiles-grid { grid-template-columns: repeat(2, 1fr); } }
+@media (min-width: 1100px) { .profiles-grid { grid-template-columns: repeat(3, 1fr); } }
+
+.profile-card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  padding: 16px;
+  transition: border-color 0.15s;
+}
+.profile-card:hover { border-color: color-mix(in oklab, var(--ink) 30%, var(--line)); }
+
+.profile-top {
+  display: flex; align-items: center; gap: 12px;
+  margin-bottom: 14px;
+}
+.profile-avatar {
+  width: 44px; height: 44px;
+  border-radius: 10px;
+  background: var(--signal);
+  color: var(--signal-ink);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 0.875rem; font-weight: 700;
+  flex-shrink: 0;
+  letter-spacing: 0;
+}
+.profile-identity { flex: 1; min-width: 0; }
+.profile-name {
+  font-size: 1rem; font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--ink);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.profile-legal {
+  font-size: 0.75rem;
+  color: var(--ink-4);
+  letter-spacing: 0.02em;
+  margin-top: 2px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.profile-actions { display: flex; gap: 4px; }
+.profile-actions .icon-btn { width: 36px; height: 36px; }
+
+.profile-rows { display: flex; flex-direction: column; }
+.profile-rows > div {
+  display: flex; justify-content: space-between; align-items: center;
+  gap: 10px;
+  padding: 8px 0;
+  border-top: 1px solid var(--line-soft);
+}
+.profile-rows > div:first-child { border-top: none; }
+.profile-rows dt {
+  font-family: var(--font-mono);
+  font-size: 0.6875rem; font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ink-4);
+  flex-shrink: 0;
+}
+.profile-rows dd {
+  font-size: 0.8125rem;
+  font-weight: 500;
+  color: var(--ink);
+  text-align: right;
+  min-width: 0;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.profile-rows dd.is-empty { color: var(--ink-4); font-style: italic; font-weight: 400; }
+
+.req { color: var(--signal); font-weight: 700; }
+
+.fade-enter-active, .fade-leave-active { transition: opacity 0.15s; }
+.fade-enter-from, .fade-leave-to { opacity: 0; }
 </style>

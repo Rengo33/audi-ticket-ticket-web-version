@@ -71,6 +71,7 @@ export function useWebSocket() {
 
   function disconnect() {
     getTokenFn = null
+    failCount = 0
     if (pingInterval) {
       clearInterval(pingInterval)
       pingInterval = null
@@ -80,7 +81,7 @@ export function useWebSocket() {
       reconnectTimer = null
     }
     if (ws) {
-      ws.onclose = null // prevent auto-reconnect
+      ws.onclose = null
       ws.close()
       ws = null
     }

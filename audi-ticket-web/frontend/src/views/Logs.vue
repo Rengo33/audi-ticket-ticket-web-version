@@ -1,39 +1,57 @@
 <template>
-  <div class="logs-view">
-    <div class="toolbar">
-      <div class="log-stats">
-        <span class="count">{{ logs.length }} entries</span>
+  <div>
+    <div class="view-head">
+      <div>
+        <div class="eyebrow">REAL-TIME STREAM</div>
+        <h1 class="view-title">Logs <span class="count mono">{{ filteredLogs.length }}</span></h1>
       </div>
-      <div class="toolbar-actions">
-        <select v-model="filterTask" class="filter-select">
-          <option :value="null">All Tasks</option>
-          <option v-for="id in taskIds" :key="id" :value="id">Task #{{ id }}</option>
-        </select>
-        <select v-model="filterLevel" class="filter-select">
-          <option value="">All Levels</option>
-          <option value="info">Info</option>
-          <option value="success">Success</option>
-          <option value="warning">Warning</option>
-          <option value="error">Error</option>
-        </select>
-        <button @click="clearLogs()" class="clear-btn">Clear</button>
+      <button @click="clearLogs()" class="btn btn-ghost" title="Clear client-side log buffer">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><polyline points="3 6 5 6 21 6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+        <span>Clear</span>
+      </button>
+    </div>
+
+    <div class="log-filters">
+      <div class="chip-group" role="tablist">
+        <button
+          class="chip mono" :class="{ 'is-active': filterTask === null }"
+          @click="filterTask = null"
+        >All</button>
+        <button
+          v-for="id in taskIds" :key="id"
+          class="chip mono" :class="{ 'is-active': filterTask === id }"
+          @click="filterTask = id"
+        >#{{ id }}</button>
+      </div>
+      <div class="chip-group" role="tablist">
+        <button
+          v-for="lvl in ['', 'info', 'success', 'warning', 'error']" :key="lvl"
+          class="chip mono" :class="[{ 'is-active': filterLevel === lvl }, 'lvl-' + (lvl || 'all')]"
+          @click="filterLevel = lvl"
+        >{{ lvl || 'all' }}</button>
       </div>
     </div>
 
-    <div v-if="filteredLogs.length === 0" class="empty-state">
-      <div class="empty-icon">📋</div>
-      <h3>No Logs</h3>
-      <p>Logs appear here in real-time when tasks are running.</p>
+    <div v-if="filteredLogs.length === 0" class="empty">
+      <div class="empty-mark">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 5h16M4 10h16M4 15h10M4 20h16"/></svg>
+      </div>
+      <h3>No logs yet</h3>
+      <p>Logs stream here in real-time when tasks are running.</p>
     </div>
 
-    <div v-else class="log-list">
-      <div v-for="(log, i) in filteredLogs" :key="i" class="log-entry" :class="log.level">
-        <div class="log-meta">
-          <span class="log-time">{{ formatTime(log.timestamp) }}</span>
-          <span class="log-task">T{{ log.task_id }}</span>
-          <span class="log-level" :class="log.level">{{ log.level }}</span>
+    <div v-else class="log-stream">
+      <div v-for="(log, i) in filteredLogs" :key="i" class="log-row" :class="'lvl-' + log.level">
+        <div class="log-gutter">
+          <span class="log-level mono" :class="'lvl-' + log.level">{{ (log.level || 'info').slice(0,1).toUpperCase() }}</span>
         </div>
-        <div class="log-message">{{ log.message }}</div>
+        <div class="log-body">
+          <div class="log-meta mono">
+            <span class="log-time">{{ formatTime(log.timestamp) }}</span>
+            <span class="log-task">T{{ log.task_id }}</span>
+          </div>
+          <div class="log-message">{{ log.message }}</div>
+        </div>
       </div>
     </div>
   </div>
@@ -43,7 +61,7 @@
 import { ref, computed } from 'vue';
 import { useLogStore } from '../stores/logs';
 
-const { logs, addLog, clear: clearLogs } = useLogStore();
+const { logs, clear: clearLogs } = useLogStore();
 const filterTask = ref(null);
 const filterLevel = ref('');
 
@@ -52,13 +70,11 @@ const taskIds = computed(() => {
   return [...ids].sort((a, b) => a - b);
 });
 
-const filteredLogs = computed(() => {
-  return logs.value.filter(l => {
-    if (filterTask.value !== null && l.task_id !== filterTask.value) return false;
-    if (filterLevel.value && l.level !== filterLevel.value) return false;
-    return true;
-  });
-});
+const filteredLogs = computed(() => logs.value.filter(l => {
+  if (filterTask.value !== null && l.task_id !== filterTask.value) return false;
+  if (filterLevel.value && l.level !== filterLevel.value) return false;
+  return true;
+}));
 
 const formatTime = (ts) => {
   if (!ts) return '';
@@ -70,59 +86,119 @@ const formatTime = (ts) => {
 </script>
 
 <style scoped>
-.logs-view { padding: 0; }
-
-.toolbar {
-  display: flex; justify-content: space-between; align-items: center;
-  margin-bottom: 1rem; flex-wrap: wrap; gap: 0.5rem;
+.view-head {
+  display: flex; align-items: flex-end; justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 1rem;
 }
-.toolbar-actions { display: flex; gap: 0.5rem; align-items: center; }
-.log-stats .count { color: var(--text-tertiary); font-size: 0.85rem; }
-.filter-select {
-  padding: 8px 12px; border: 1px solid var(--border-light); border-radius: 8px;
-  font-size: 0.85rem; background: var(--input-bg); color: var(--text-primary);
+.view-title {
+  font-size: clamp(1.5rem, 4vw, 2rem);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.1;
+  margin-top: 4px;
+  display: flex; align-items: baseline; gap: 10px;
 }
-.clear-btn {
-  padding: 8px 16px; border: 1px solid var(--border-light); border-radius: 8px;
-  background: none; color: var(--text-secondary); cursor: pointer; font-size: 0.85rem;
-}
-.clear-btn:hover { background: var(--hover-bg); }
-
-.log-list {
-  background: var(--card-bg); border-radius: 12px; border: 1px solid var(--border-light);
-  overflow: hidden; max-height: calc(100vh - 220px); overflow-y: auto;
+.count {
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: var(--ink-4);
 }
 
-.log-entry {
-  padding: 8px 16px; border-bottom: 1px solid var(--border-light);
-  font-family: 'SF Mono', 'Fira Code', monospace; font-size: 0.82rem;
+.log-filters {
+  display: flex; flex-direction: column; gap: 8px;
+  margin-bottom: 1rem;
 }
-.log-entry:last-child { border-bottom: none; }
-.log-entry.error { background: rgba(255,59,48,0.05); }
-.log-entry.success { background: rgba(52,199,89,0.05); }
-.log-entry.warning { background: rgba(255,149,0,0.05); }
+.chip-group {
+  display: flex; gap: 6px;
+  overflow-x: auto;
+  scrollbar-width: none;
+  padding-bottom: 2px;
+}
+.chip-group::-webkit-scrollbar { display: none; }
 
-.log-meta { display: flex; gap: 8px; align-items: center; margin-bottom: 2px; }
-.log-time { color: var(--text-tertiary); font-size: 0.75rem; }
-.log-task {
-  background: var(--hover-bg); padding: 1px 6px; border-radius: 4px;
-  font-size: 0.7rem; font-weight: 600; color: var(--text-secondary);
+.chip {
+  flex-shrink: 0;
+  padding: 6px 12px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--ink-3);
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+  -webkit-tap-highlight-color: transparent;
+}
+.chip:hover { color: var(--ink); border-color: var(--ink-3); }
+.chip.is-active { background: var(--ink); color: var(--bg); border-color: var(--ink); }
+.chip.lvl-error.is-active { background: var(--bad); border-color: var(--bad); color: white; }
+.chip.lvl-success.is-active { background: var(--ok); border-color: var(--ok); color: white; }
+.chip.lvl-warning.is-active { background: var(--warn); border-color: var(--warn); color: white; }
+.chip.lvl-info.is-active { background: var(--info); border-color: var(--info); color: white; }
+
+.log-stream {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  font-family: var(--font-mono);
+  max-height: calc(100vh - 280px);
+  overflow-y: auto;
+}
+
+.log-row {
+  display: grid;
+  grid-template-columns: 36px 1fr;
+  border-bottom: 1px solid var(--line-soft);
+  padding: 8px 12px 8px 0;
+}
+.log-row:last-child { border-bottom: none; }
+.log-row.lvl-error { background: color-mix(in oklab, var(--bad) 6%, transparent); }
+.log-row.lvl-success { background: color-mix(in oklab, var(--ok) 5%, transparent); }
+.log-row.lvl-warning { background: color-mix(in oklab, var(--warn) 5%, transparent); }
+
+.log-gutter {
+  display: flex; align-items: flex-start; justify-content: center;
+  padding-top: 2px;
 }
 .log-level {
-  padding: 1px 6px; border-radius: 4px; font-size: 0.7rem; font-weight: 700; text-transform: uppercase;
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 20px; height: 20px;
+  border-radius: 4px;
+  font-size: 0.6875rem;
+  font-weight: 700;
+  letter-spacing: 0;
 }
-.log-level.info { background: rgba(0,122,255,0.1); color: #007AFF; }
-.log-level.success { background: rgba(52,199,89,0.15); color: #34c759; }
-.log-level.warning { background: rgba(255,149,0,0.15); color: #ff9500; }
-.log-level.error { background: rgba(255,59,48,0.15); color: #ff3b30; }
+.log-level.lvl-info { background: var(--info-soft); color: var(--info); }
+.log-level.lvl-success { background: var(--ok-soft); color: var(--ok); }
+.log-level.lvl-warning { background: var(--warn-soft); color: var(--warn); }
+.log-level.lvl-error { background: var(--bad-soft); color: var(--bad); }
 
-.log-message { color: var(--text-primary); word-break: break-word; line-height: 1.4; }
+.log-body { min-width: 0; }
+.log-meta {
+  display: flex; gap: 10px;
+  font-size: 0.6875rem;
+  color: var(--ink-4);
+  margin-bottom: 1px;
+}
+.log-task {
+  color: var(--ink-3);
+  font-weight: 600;
+}
+.log-message {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  line-height: 1.5;
+  color: var(--ink-2);
+  word-break: break-word;
+}
 
-.empty-state { text-align: center; padding: 4rem; color: var(--text-tertiary); }
-.empty-icon { font-size: 3rem; margin-bottom: 1rem; }
-
-@media (max-width: 768px) {
-  .toolbar { flex-direction: column; align-items: stretch; }
-  .log-entry { padding: 6px 12px; font-size: 0.78rem; }
+@media (max-width: 600px) {
+  .log-stream { max-height: calc(100vh - 320px); }
+  .log-row { padding-right: 10px; }
+  .log-message { font-size: 0.6875rem; }
 }
 </style>
