@@ -64,11 +64,12 @@ class CartSessionResponse(BaseModel):
     quantity: int
     price_category: int = 0
     checkout_status: str = "pending"
+    auto_checkout: bool = False
     total_time: Optional[float]
     created_at: datetime
     expires_at: datetime
     used_at: Optional[datetime]
-    
+
     class Config:
         from_attributes = True
 

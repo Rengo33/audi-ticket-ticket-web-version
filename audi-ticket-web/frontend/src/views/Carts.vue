@@ -42,7 +42,10 @@
         </div>
 
         <div class="cart-body">
-          <h3 class="cart-title">{{ getDisplayName(cart.product_url || cart.checkout_url) }}</h3>
+          <h3 class="cart-title">
+            <span v-if="cart.auto_checkout" class="aco-tag mono">[ACO]</span>
+            {{ getDisplayName(cart.product_url || cart.checkout_url) }}
+          </h3>
           <div class="cart-meta mono">
             <span>{{ cart.quantity }}× tix</span>
             <span class="dot-sep">·</span>
@@ -233,6 +236,18 @@ onUnmounted(() => { if (timer) clearInterval(timer); });
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
+}
+.aco-tag {
+  display: inline-block;
+  margin-right: 6px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: var(--signal-soft);
+  color: var(--signal);
+  font-size: 0.6875rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  vertical-align: 2px;
 }
 .cart-meta {
   font-size: 0.75rem;

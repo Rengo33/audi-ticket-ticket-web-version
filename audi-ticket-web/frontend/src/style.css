@@ -9,6 +9,11 @@
    ──────────────────────────────────────────────────────────── */
 
 :root {
+  /* Tell the browser to render form widgets/scrollbars/autofill matching our
+     theme. Without this, native inputs use the OS scheme and overwrite our
+     colors — typed text ends up white-on-white in dark mode. */
+  color-scheme: light;
+
   /* LIGHT — paper & ink */
   --bg: #ffffff;
   --bg-subtle: #f6f6f7;
@@ -60,6 +65,8 @@
 }
 
 [data-theme="dark"] {
+  color-scheme: dark;
+
   /* DARK — midnight & red */
   --bg: #0b0b0d;
   --bg-subtle: #101013;
@@ -159,8 +166,11 @@ html, body {
 .btn-danger { background: var(--bad-soft); color: var(--bad); border-color: color-mix(in oklab, var(--bad) 30%, transparent); }
 .btn-danger:hover:not(:disabled) { background: var(--bad); color: white; }
 
-/* Inputs */
-.input, input[type="text"], input[type="password"], input[type="email"],
+/* Inputs
+   `input:not([type])` catches bare <input> without an explicit type attribute
+   — `input[type="text"]` alone doesn't match those, so they'd fall back to
+   browser defaults and break in dark mode. */
+.input, input:not([type]), input[type="text"], input[type="password"], input[type="email"],
 input[type="number"], input[type="tel"], select, textarea {
   width: 100%;
   height: 44px;
@@ -188,8 +198,10 @@ input:focus, select:focus, textarea:focus {
   border-color: var(--signal);
   box-shadow: 0 0 0 3px var(--signal-soft);
   background: var(--surface);
+  color: var(--ink);
 }
-input::placeholder { color: var(--ink-4); font-weight: 400; }
+input::placeholder,
+textarea::placeholder { color: var(--ink-4); font-weight: 400; }
 input:-webkit-autofill,
 input:-webkit-autofill:hover,
 input:-webkit-autofill:focus {

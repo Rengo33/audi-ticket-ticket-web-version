@@ -20,7 +20,7 @@ from sqlalchemy.orm import Session
 from ..auth import get_current_user
 from ..config import get_settings
 from ..database import get_db
-from ..models import CartSession
+from ..models import CartSession, Task
 from ..schemas import CartSessionResponse
 
 logger = logging.getLogger(__name__)
@@ -106,7 +106,31 @@ async def list_cart_sessions(
     db: Session = Depends(get_db),
     _: bool = Depends(get_current_user),
 ):
-    return db.query(CartSession).order_by(CartSession.created_at.desc()).limit(50).all()
+    rows = (
+        db.query(CartSession, Task.auto_checkout)
+        .outerjoin(Task, CartSession.task_id == Task.id)
+        .order_by(CartSession.created_at.desc())
+        .limit(50)
+        .all()
+    )
+    return [
+        {
+            "id": cart.id,
+            "token": cart.token,
+            "task_id": cart.task_id,
+            "product_url": cart.product_url,
+            "checkout_url": cart.checkout_url,
+            "quantity": cart.quantity,
+            "price_category": cart.price_category or 0,
+            "checkout_status": cart.checkout_status,
+            "auto_checkout": bool(auto_checkout),
+            "total_time": cart.total_time,
+            "created_at": cart.created_at,
+            "expires_at": cart.expires_at,
+            "used_at": cart.used_at,
+        }
+        for cart, auto_checkout in rows
+    ]
 
 
 @router.get("/api/checkout/{token}/cookie")

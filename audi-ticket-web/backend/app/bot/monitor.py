@@ -53,6 +53,7 @@ class AvailabilityWatcher:
         self._bot: Optional[AudiTicketBot] = None
         self.scan_count = 0
         self._last_discord_data = None
+        self._option_cache: Dict[str, str] = {}  # (variation,date,time) -> option_number
 
     @property
     def key(self) -> str:
@@ -89,6 +90,8 @@ class AvailabilityWatcher:
             self._bot = AudiTicketBot()
             await self._bot.start_session()
 
+            _prev_total = -1
+
             while self.subscribers:
                 data = await self._bot.get_available_tickets(self.event_id, self.ticket_id)
                 self.scan_count += 1
@@ -104,10 +107,13 @@ class AvailabilityWatcher:
                     except Exception:
                         total_available = 0
 
-                # Batch-update all subscriber tasks in one commit
+                # Only update DB when scan count is periodic or availability changed
                 now = datetime.utcnow()
                 sub_ids = [sub.task_id for sub in self.subscribers.values()]
-                if sub_ids:
+                availability_changed = total_available != _prev_total
+                _prev_total = total_available
+
+                if sub_ids and (availability_changed or self.scan_count % 10 == 0):
                     db.query(Task).filter(Task.id.in_(sub_ids)).update({
                         Task.scan_count: self.scan_count,
                         Task.tickets_available: total_available,
@@ -226,9 +232,14 @@ class AvailabilityWatcher:
                             await self.manager._log(sub.task_id, "warning",
                                 f"Falling back to variation {variation}", db)
 
-                        option_number = await self._bot.get_option_number(
-                            self.event_id, variation, date, time_encoded
-                        )
+                        cache_key = f"{variation}:{date}:{time_encoded}"
+                        option_number = self._option_cache.get(cache_key)
+                        if not option_number:
+                            option_number = await self._bot.get_option_number(
+                                self.event_id, variation, date, time_encoded
+                            )
+                            if option_number:
+                                self._option_cache[cache_key] = option_number
 
                         if not option_number:
                             continue
@@ -261,6 +272,13 @@ class AvailabilityWatcher:
                             await self.manager._log(sub.task_id, "warning",
                                 f"Primary variation {variation} failed, trying fallbacks...", db)
 
+                    # All variations failed for this ticket. Clear previous_data
+                    # so the next scan with the same availability can retry —
+                    # otherwise a transient ATC error would silently stick the
+                    # task until availability changes.
+                    await self.manager._log(sub.task_id, "warning",
+                        "ATC exhausted all variations — will retry on next scan", db)
+                    sub.previous_data = None
                     return
         finally:
             sub.processing = False
@@ -272,9 +290,9 @@ class AvailabilityWatcher:
         auto_checkout = getattr(task, 'auto_checkout', False) if task else False
         billing_profile_id = getattr(task, 'billing_profile_id', None) if task else None
 
+        aco_completed = 0
         if auto_checkout and billing_profile_id:
-            # ACO: run auto-checkout
-            await self._run_auto_checkout(sub, task, db)
+            aco_completed = await self._run_auto_checkout(sub, task, db)
         else:
             # Normal flow: just notify and wait for manual checkout
             await self.manager._log(sub.task_id, "success",
@@ -289,6 +307,15 @@ class AvailabilityWatcher:
             "type": "task_update",
             "data": {"task_id": sub.task_id, "status": "success"}
         })
+
+        # ACO placed at least one order — user has their tickets. Stop monitoring
+        # for this task so we don't cart again (and risk a duplicate order)
+        # during the would-be re-cart window.
+        if aco_completed > 0:
+            await self.manager._log(sub.task_id, "success",
+                f"{aco_completed} order(s) placed — stopping monitor.", db)
+            self.manager.detach_subscriber(sub.task_id)
+            return
 
         await asyncio.sleep(3)
 
@@ -315,15 +342,17 @@ class AvailabilityWatcher:
 
         asyncio.create_task(self._reactivate_after_wait(sub, cart_hold - 3))
 
-    async def _run_auto_checkout(self, sub: TaskSubscriber, task: Task, db: Session):
-        """Run the full auto-checkout flow after successful ATC."""
+    async def _run_auto_checkout(self, sub: TaskSubscriber, task: Task, db: Session) -> int:
+        """Run the full auto-checkout flow after successful ATC.
+
+        Returns the count of carts that reached `completed` status."""
         # Support multiple billing profiles (comma-separated IDs)
         profile_id_str = str(task.billing_profile_id or "")
         profile_ids = [int(x.strip()) for x in profile_id_str.split(",") if x.strip().isdigit()]
 
         if not profile_ids:
             await self.manager._log(sub.task_id, "error", "ACO: No billing profile IDs configured", db)
-            return
+            return 0
 
         profiles = db.query(BillingProfile).filter(BillingProfile.id.in_(profile_ids)).all()
         profile_map = {p.id: p for p in profiles}
@@ -332,7 +361,7 @@ class AvailabilityWatcher:
         ordered_profiles = [profile_map[pid] for pid in profile_ids if pid in profile_map]
         if not ordered_profiles:
             await self.manager._log(sub.task_id, "error", "ACO: Billing profile(s) not found", db)
-            return
+            return 0
 
         # Get only pending, non-expired cart sessions from this cart cycle
         now = datetime.utcnow()
@@ -344,12 +373,13 @@ class AvailabilityWatcher:
 
         if not carts:
             await self.manager._log(sub.task_id, "error", "ACO: No pending cart sessions found", db)
-            return
+            return 0
 
         profile_names = ", ".join(p.name for p in ordered_profiles)
         await self.manager._log(sub.task_id, "info",
             f"ACO: Processing {len(carts)} cart(s) with {len(ordered_profiles)} profile(s): {profile_names}", db)
 
+        completed = 0
         for i, cart in enumerate(carts):
             # Round-robin assign profiles to carts
             profile = ordered_profiles[i % len(ordered_profiles)]
@@ -360,10 +390,12 @@ class AvailabilityWatcher:
             await self.manager._log(sub.task_id, "info",
                 f"ACO: Checkout {i+1}/{len(carts)} (cart {cart.id})...", db)
 
-            await self._run_single_checkout(sub, cart, profile, db)
+            if await self._run_single_checkout(sub, cart, profile, db):
+                completed += 1
+        return completed
 
-    async def _run_single_checkout(self, sub, cart, profile, db):
-        """Run ACO for a single cart session."""
+    async def _run_single_checkout(self, sub, cart, profile, db) -> bool:
+        """Run ACO for a single cart session. Returns True if the order placed."""
         async with AutoCheckout(cart.cookie_name, cart.cookie_value) as aco:
             # Step 1: Submit billing
             result = await aco.submit_billing(profile)
@@ -373,7 +405,7 @@ class AvailabilityWatcher:
                 cart.checkout_error = result.message
                 db.commit()
                 await send_discord_aco_update(sub.product_url, "failed", f"Cart {cart.id}: {result.message}")
-                return
+                return False
 
             await self.manager._log(sub.task_id, "info", f"ACO: Billing submitted. PI: {result.payment_intent_id}", db)
             cart.checkout_status = "billing_done"
@@ -397,7 +429,7 @@ class AvailabilityWatcher:
                 cart.checkout_error = result.message
                 db.commit()
                 await send_discord_aco_update(sub.product_url, "failed", f"Cart {cart.id}: {result.message}")
-                return
+                return False
 
             pm_id = result.payment_method_id
             await self.manager._log(sub.task_id, "success", "ACO: Payment confirmed!", db)
@@ -414,23 +446,28 @@ class AvailabilityWatcher:
                 await self.manager._log(sub.task_id, "success", f"ACO: Cart {cart.id} — {order_result.message}", db)
                 cart.checkout_status = "completed"
                 db.commit()
-                await send_discord_aco_update(sub.product_url, "completed", f"Cart {cart.id}: Order confirmed!")
+                await send_discord_aco_update(sub.product_url, "completed", f"Cart {cart.id}: {order_result.message}")
                 await self.manager.broadcast({
                     "type": "task_update",
                     "data": {"task_id": sub.task_id, "status": "checkout_complete"}
                 })
-            else:
-                await self.manager._log(sub.task_id, "error", f"ACO: Cart {cart.id} order failed: {order_result.message}", db)
-                cart.checkout_status = "failed"
-                cart.checkout_error = order_result.message
-                db.commit()
-                await send_discord_aco_update(sub.product_url, "failed", f"Cart {cart.id}: {order_result.message}")
+                return True
+
+            await self.manager._log(sub.task_id, "error", f"ACO: Cart {cart.id} order failed: {order_result.message}", db)
+            cart.checkout_status = "failed"
+            cart.checkout_error = order_result.message
+            db.commit()
+            await send_discord_aco_update(sub.product_url, "failed", f"Cart {cart.id}: {order_result.message}")
+            return False
 
     async def _reactivate_after_wait(self, sub: TaskSubscriber, wait_seconds: int):
         """Reactivate a subscriber after cart hold wait."""
         await asyncio.sleep(wait_seconds)
 
-        if sub.task_id not in self.subscribers:
+        # Identity check — if the user stopped/restarted the task during the
+        # wait, the current subscriber is a different object than the one we
+        # scheduled this timer for. Don't touch the new one.
+        if self.subscribers.get(sub.task_id) is not sub:
             return
 
         sub.waiting_until = None
@@ -485,6 +522,18 @@ class TaskManager:
             self._task_watcher_map.pop(tid, None)
             self.active_tasks.pop(tid, None)
             self.task_data.pop(tid, None)
+
+    def detach_subscriber(self, task_id: int):
+        """Unsubscribe a task and release its in-memory state, without marking
+        STOPPED. Called when a task finishes on its own (e.g. ACO placed an
+        order) so the SUCCESS status in the DB survives."""
+        watcher_key = self._task_watcher_map.pop(task_id, None)
+        if watcher_key:
+            watcher = self._watchers.get(watcher_key)
+            if watcher:
+                watcher.remove_subscriber(task_id)
+        self.active_tasks.pop(task_id, None)
+        self.task_data.pop(task_id, None)
 
     async def start_task(self, task: Task, db: Session) -> bool:
         """Start a monitoring task."""
@@ -647,8 +696,10 @@ class TaskManager:
         time_short: str, variation: str, option_number: str, quantity: int,
         product_url: str, price_category: int, start_time: float, db: Session
     ) -> bool:
-        """Attempt to add to cart (single thread)."""
-        async with AudiTicketBot() as atc_bot:
+        """Attempt to add to cart (single thread). Creates fresh session for unique cookie."""
+        atc_bot = AudiTicketBot()
+        await atc_bot.start_session()
+        try:
             success, cookie, error = await atc_bot.add_to_cart(
                 event_id, date, time_short, variation,
                 option_number, quantity, product_url
@@ -658,7 +709,7 @@ class TaskManager:
                 total_time = time.time() - start_time
 
                 await self._log(task_id, "success",
-                    f"Cookie secured: {cookie.name} (Time: {total_time:.2f}s)", db)
+                    f"Cookie secured: {cookie.value} (Time: {total_time:.2f}s)", db)
 
                 token = secrets.token_urlsafe(32)
                 cart_session = CartSession(
@@ -690,6 +741,8 @@ class TaskManager:
                 if error:
                     await self._log(task_id, "warning", f"ATC failed: {error}", db)
                 return False
+        finally:
+            await atc_bot.close_session()
 
     async def _mark_failed(self, task_id: int, error: str, db: Session):
         """Mark task as failed."""

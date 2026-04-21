@@ -219,11 +219,15 @@ class BayernScraper:
 
             # Extract price categories (e.g. "Kategorie 1 - Block 136: 80,00 Euro")
             price_categories = []
+            seen = set()
             for cat_match in re.finditer(r'(Kategorie\s+\d+\s*-\s*Block\s+\d+):\s*([\d,.]+)\s*Euro', html):
-                price_categories.append({
-                    "name": cat_match.group(1).strip(),
-                    "price": float(cat_match.group(2).replace(',', '.'))
-                })
+                name = cat_match.group(1).strip()
+                if name not in seen:
+                    seen.add(name)
+                    price_categories.append({
+                        "name": name,
+                        "price": float(cat_match.group(2).replace(',', '.'))
+                    })
 
             return BayernGame(
                 id=game_id,

@@ -31,6 +31,17 @@ STRIPE_PK = "pk_live_0j2JVbs4TBKMV39UGD7KmTqU"
 AUDI_BASE = "https://audidefuehrungen2.regiondo.de"
 STRIPE_JS_VERSION = "stripe.js/cc947ffb8d; stripe-js-v3/cc947ffb8d; card-element"
 
+# Any one of these substrings on /checkout/onepage/success means the order was
+# placed. Verified against a real manual checkout HAR. The template is shared
+# across payment methods (CC, invoice, etc.).
+SUCCESS_PAGE_MARKERS = (
+    "checkout-onepage-success",
+    "checkout-success-page",
+    "Vielen Dank für Ihre Bestellung",
+)
+# Regiondo emits the public 12-digit order number as data-qa on .success-title.
+SUCCESS_ORDER_REF_RE = re.compile(r'class="success-title[^"]*"\s+data-qa="(\d+)"')
+
 # Only one headless browser checkout at a time (server memory constraint)
 _browser_lock = asyncio.Lock()
 
@@ -366,7 +377,15 @@ class AutoCheckout:
             return CheckoutResult(False, "failed", str(e))
 
     async def place_order(self, pi_id: str, pm_id: str, cardholder: str) -> CheckoutResult:
-        """Step 3: Submit the order to the Audi backend."""
+        """Step 3: Submit the order to the Audi backend.
+
+        saveorder's JSON response shape isn't documented, and we have no
+        captured sample from a successful run. Instead of guessing, we POST
+        saveorder and then GET the success page — if it renders with the
+        markers we verified from a real manual checkout HAR, the order was
+        placed. This works identically for CC and invoice payments since
+        Regiondo reuses one success template.
+        """
         try:
             form_data = {
                 "payment[method]": "cryozonic_stripeintent",
@@ -383,25 +402,32 @@ class AutoCheckout:
                     "X-Requested-With": "XMLHttpRequest",
                 },
             )
+            logger.info(f"[ACO] saveorder status={r.status_code} body={r.text[:300]}")
 
-            logger.info(f"[ACO] SaveOrder status: {r.status_code}, response: {r.text[:300]}")
+            sr = await self.session.get(f"{AUDI_BASE}/checkout/onepage/success")
+            html = sr.text
+            if any(m in html for m in SUCCESS_PAGE_MARKERS):
+                ref_match = SUCCESS_ORDER_REF_RE.search(html)
+                order_ref = ref_match.group(1) if ref_match else None
+                logger.info(f"[ACO] order placed, ref={order_ref}")
+                return CheckoutResult(
+                    True, "completed",
+                    f"Order placed (#{order_ref or 'unknown'})",
+                    payment_intent_id=pi_id,
+                    payment_method_id=pm_id,
+                    order_url=f"{AUDI_BASE}/checkout/onepage/success",
+                )
 
-            if r.status_code == 200:
-                try:
-                    data = r.json()
-                    if data.get("success") or data.get("redirect"):
-                        return CheckoutResult(True, "completed", "Order placed!", order_url=data.get("redirect", ""))
-                    else:
-                        return CheckoutResult(False, "failed", f"Order failed: {data.get('error', str(data))}")
-                except Exception:
-                    if "success" in r.text.lower() or "Bestellung" in r.text:
-                        return CheckoutResult(True, "completed", "Order placed!")
-                    return CheckoutResult(False, "failed", f"Unexpected response: {r.text[:200]}")
-
-            return CheckoutResult(False, "failed", f"SaveOrder returned {r.status_code}")
+            return CheckoutResult(
+                False, "failed",
+                f"No success page after saveorder (status={r.status_code}): {r.text[:200]}",
+                payment_intent_id=pi_id,
+                payment_method_id=pm_id,
+            )
 
         except Exception as e:
             logger.error(f"[ACO] SaveOrder error: {e}")
+            logger.error(traceback.format_exc())
             return CheckoutResult(False, "failed", str(e))
 
 

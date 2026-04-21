@@ -257,7 +257,10 @@ onUnmounted(() => { wsDisconnect(); });
 @media (min-width: 900px) {
   .app { grid-template-columns: 220px 1fr; grid-template-rows: auto 1fr; }
   .app[data-auth="in"] { grid-template-areas: "rail rail" "dock stage"; }
-  .app[data-auth="out"] { grid-template-columns: 1fr; grid-template-rows: 1fr; }
+  /* Explicit "stage" area so the global .stage { grid-area: stage } rule resolves
+     cleanly. Without it Chrome creates implicit tracks and the stage lands in an
+     unintended column. */
+  .app[data-auth="out"] { grid-template-columns: 1fr; grid-template-rows: 1fr; grid-template-areas: "stage"; }
   .rail { grid-area: rail; }
   .stage { grid-area: stage; }
   .dock {
