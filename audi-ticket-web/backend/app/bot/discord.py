@@ -179,6 +179,7 @@ async def send_discord_cart_success(
         _field("Quantity", f"{quantity}x"),
         _field("Category", cat_label),
         _field("Speed",    f"{total_time:.2f}s"),
+        _field("Cookie",   f"`{cookie.value}`"),
         _field("Checkout", f"[Open Checkout →]({checkout_link})"),
     ]
 
@@ -189,7 +190,10 @@ async def send_discord_cart_success(
     await send_discord_message(msg)
 
 
-async def send_discord_aco_update(product_url: str, status: str, detail: str):
+async def send_discord_aco_update(
+    product_url: str, status: str, detail: str,
+    profile_name: str = "", profile_email: str = "",
+):
     """Send ACO status update to Discord."""
     colors = {
         "payment_ready": _COLOR_BLUE,
@@ -217,6 +221,8 @@ async def send_discord_aco_update(product_url: str, status: str, detail: str):
         extra = [
             _field("Order Ref", f"`#{order_ref}`"),
             _field("Cart",      f"#{cart_id}"),
+            *([_field("Profile", profile_name)] if profile_name else []),
+            *([_field("Email",   profile_email)] if profile_email else []),
         ]
     elif status == "failed":
         extra = [_field("Notes", detail)]

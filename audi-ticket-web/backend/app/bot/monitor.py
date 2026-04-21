@@ -446,7 +446,10 @@ class AvailabilityWatcher:
                 await self.manager._log(sub.task_id, "success", f"ACO: Cart {cart.id} — {order_result.message}", db)
                 cart.checkout_status = "completed"
                 db.commit()
-                await send_discord_aco_update(sub.product_url, "completed", f"Cart {cart.id}: {order_result.message}")
+                await send_discord_aco_update(
+                    sub.product_url, "completed", f"Cart {cart.id}: {order_result.message}",
+                    profile_name=profile.name, profile_email=profile.email,
+                )
                 await self.manager.broadcast({
                     "type": "task_update",
                     "data": {"task_id": sub.task_id, "status": "checkout_complete"}
