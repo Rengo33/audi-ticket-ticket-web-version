@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <!-- Edge-to-edge fill so OS masks (circle, squircle, square) stay red -->
+  <rect width="512" height="512" fill="#dc052d"/>
+  <!-- "A" kept inside the inner 80% safe zone per maskable icon spec -->
+  <text x="256" y="256" text-anchor="middle" dominant-baseline="central"
+        font-family="Helvetica, Arial, sans-serif" font-weight="900" font-size="260"
+        letter-spacing="-8" fill="#ffffff">A</text>
+</svg>
