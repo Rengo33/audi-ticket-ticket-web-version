@@ -19,6 +19,7 @@ from ..config import get_settings
 from ..database import SessionLocal
 from .core import AudiTicketBot, CookieData
 from .discord import send_discord_notification, send_discord_cart_success
+from .web_push import send_push
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -673,6 +674,12 @@ class TaskManager:
 
                 await send_discord_cart_success(
                     product_url, cookie, quantity, total_time, token, price_category
+                )
+                await send_push(
+                    title="Cart secured",
+                    body=f"{quantity}× in {total_time:.1f}s — tap to checkout",
+                    url="/carts",
+                    tag=f"cart-task-{task_id}",
                 )
 
                 return True

@@ -22,6 +22,7 @@ from ..models import BillingProfile, CartSession
 from ..database import SessionLocal
 from .checkout import AutoCheckout
 from .discord import send_discord_aco_update
+from .web_push import send_push
 
 logger = logging.getLogger(__name__)
 
@@ -96,6 +97,12 @@ async def run_single_checkout(cart: CartSession, profile: BillingProfile, db: Se
             db.commit()
             await _broadcast_cart_update(cart)
             await send_discord_aco_update(product_url, "failed", f"Cart {cart.id}: {result.message}")
+            await send_push(
+                title="Billing failed",
+                body=f"Cart #{cart.id}: {result.message}",
+                url="/carts",
+                tag=f"cart-{cart.id}",
+            )
             return False
 
         await _log(task_id, "info", f"ACO: Billing submitted. PI: {result.payment_intent_id}", db)
@@ -123,6 +130,12 @@ async def run_single_checkout(cart: CartSession, profile: BillingProfile, db: Se
             db.commit()
             await _broadcast_cart_update(cart)
             await send_discord_aco_update(product_url, "failed", f"Cart {cart.id}: {result.message}")
+            await send_push(
+                title="Payment failed",
+                body=f"Cart #{cart.id}: {result.message}",
+                url="/carts",
+                tag=f"cart-{cart.id}",
+            )
             return False
 
         pm_id = result.payment_method_id
@@ -150,6 +163,12 @@ async def run_single_checkout(cart: CartSession, profile: BillingProfile, db: Se
                 profile_name=profile.name, profile_email=profile.email,
                 order_ref=order_result.order_ref, cart_id=str(cart.id),
             )
+            await send_push(
+                title="Order placed",
+                body=f"Cart #{cart.id} · Ref #{order_result.order_ref or '—'} · {profile.name}",
+                url="/carts",
+                tag=f"cart-{cart.id}",
+            )
             from .monitor import task_manager  # noqa: WPS433
             if task_id is not None:
                 try:
@@ -167,6 +186,12 @@ async def run_single_checkout(cart: CartSession, profile: BillingProfile, db: Se
         db.commit()
         await _broadcast_cart_update(cart)
         await send_discord_aco_update(product_url, "failed", f"Cart {cart.id}: {order_result.message}")
+        await send_push(
+            title="Order failed",
+            body=f"Cart #{cart.id}: {order_result.message}",
+            url="/carts",
+            tag=f"cart-{cart.id}",
+        )
         return False
 
 
