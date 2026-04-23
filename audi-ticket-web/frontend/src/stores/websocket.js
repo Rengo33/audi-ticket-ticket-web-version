@@ -119,6 +119,10 @@ export function useWebSocket() {
         })
         break
 
+      case 'cart_update':
+        cartStore.applyCartUpdate(msg.data)
+        break
+
       case 'log':
         logStore.addLog(msg.data)
         break

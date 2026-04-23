@@ -15,12 +15,13 @@ from typing import Dict, Tuple
 from curl_cffi.requests import AsyncSession
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from ..auth import get_current_user
 from ..config import get_settings
 from ..database import get_db
-from ..models import CartSession, Task
+from ..models import BillingProfile, CartSession, Task
 from ..schemas import CartSessionResponse
 
 logger = logging.getLogger(__name__)
@@ -113,24 +114,70 @@ async def list_cart_sessions(
         .limit(50)
         .all()
     )
+    profile_ids = {c.billing_profile_id for c, _ in rows if c.billing_profile_id}
+    profile_name_by_id: dict[int, str] = {}
+    if profile_ids:
+        for p in db.query(BillingProfile.id, BillingProfile.name).filter(
+            BillingProfile.id.in_(profile_ids)
+        ).all():
+            profile_name_by_id[p.id] = p.name
     return [
         {
             "id": cart.id,
             "token": cart.token,
             "task_id": cart.task_id,
+            "event_id": cart.event_id,
             "product_url": cart.product_url,
             "checkout_url": cart.checkout_url,
             "quantity": cart.quantity,
             "price_category": cart.price_category or 0,
             "checkout_status": cart.checkout_status,
             "auto_checkout": bool(auto_checkout),
+            "billing_profile_id": cart.billing_profile_id,
+            "billing_profile_name": profile_name_by_id.get(cart.billing_profile_id) if cart.billing_profile_id else None,
             "total_time": cart.total_time,
+            "invoice_url": cart.invoice_url,
+            "checkout_error": cart.checkout_error,
             "created_at": cart.created_at,
             "expires_at": cart.expires_at,
             "used_at": cart.used_at,
         }
         for cart, auto_checkout in rows
     ]
+
+
+class ManualCheckoutBody(BaseModel):
+    billing_profile_id: int
+
+
+@router.post("/api/carts/{cart_id}/checkout")
+async def manual_checkout(
+    cart_id: int,
+    body: ManualCheckoutBody,
+    db: Session = Depends(get_db),
+    _: bool = Depends(get_current_user),
+):
+    """Trigger ACO for a specific cart with a user-chosen profile.
+
+    The dispatcher's global lock prevents racing with auto-dispatch or a
+    duplicate click. `billing_profile_id` bypasses the used-check: the UI has
+    already shown the user that the profile is used (badge + confirm).
+    """
+    cart = db.query(CartSession).filter(CartSession.id == cart_id).first()
+    if not cart:
+        raise HTTPException(404, "Cart not found")
+    if cart.checkout_status not in ("pending", "failed"):
+        raise HTTPException(409, f"Cart is {cart.checkout_status}, cannot start checkout")
+    if datetime.utcnow() > cart.expires_at:
+        raise HTTPException(410, "Cart expired")
+
+    from ..bot.aco_dispatcher import AcoDispatcher
+    ok, msg = await AcoDispatcher.get().run_checkout(
+        cart_id=cart.id,
+        profile_pool_ids=[],
+        forced_profile_id=body.billing_profile_id,
+    )
+    return {"success": ok, "message": msg}
 
 
 @router.get("/api/checkout/{token}/cookie")

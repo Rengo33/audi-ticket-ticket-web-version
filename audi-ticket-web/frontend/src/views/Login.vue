@@ -9,10 +9,10 @@
       </div>
       <div class="sb-row sb-row-sep">
         <span class="sb-label mono">AWAY</span>
-        <span class="sb-team">···</span>
+        <span class="sb-team">{{ nextGame?.opponent || '···' }}</span>
         <span class="sb-score mono">—</span>
       </div>
-      <div class="sb-kick mono">KICKOFF · 07:00 LOCAL</div>
+      <div class="sb-kick mono">KICKOFF · {{ nextGame ? countdown : '—' }}</div>
     </div>
 
     <div class="login-panel">
@@ -27,8 +27,7 @@
       </h1>
 
       <p class="login-sub">
-        Sign in to monitor ticket drops, auto-cart on release,<br class="hide-mobile">
-        and hand off to Auto-Checkout.
+        Sign in to monitor ticket drops, auto-cart on release, and hand off to Auto-Checkout.
       </p>
 
       <form @submit.prevent="handleLogin" class="login-form" novalidate>
@@ -63,7 +62,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted, nextTick } from 'vue'
+import { ref, onMounted, onUnmounted, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAuthStore } from '../stores/auth'
 
@@ -72,6 +71,11 @@ const authStore = useAuthStore()
 const password = ref('')
 const pwField = ref(null)
 
+const nextGame = ref(null)
+const countdown = ref('—')
+let tickTimer = null
+let fetchController = null
+
 async function handleLogin() {
   if (!password.value || authStore.loading) return
   const success = await authStore.login(password.value)
@@ -79,9 +83,46 @@ async function handleLogin() {
   else await nextTick(() => pwField.value?.focus())
 }
 
+function formatCountdown(kickoffMs) {
+  const diff = kickoffMs - Date.now()
+  if (diff <= 0) return 'LIVE'
+  const s = Math.floor(diff / 1000)
+  const days = Math.floor(s / 86400)
+  const hours = Math.floor((s % 86400) / 3600)
+  const mins = Math.floor((s % 3600) / 60)
+  const secs = s % 60
+  const pad = n => String(n).padStart(2, '0')
+  if (days > 0) return `${days}d ${hours}h ${pad(mins)}m ${pad(secs)}s`
+  return `${pad(hours)}:${pad(mins)}:${pad(secs)}`
+}
+
+async function loadNextGame() {
+  fetchController = new AbortController()
+  try {
+    const res = await fetch('/api/games/next', { signal: fetchController.signal })
+    if (!res.ok) return
+    const data = await res.json()
+    if (!data || !data.kickoff_utc) return
+    nextGame.value = data
+    const kickoffMs = new Date(data.kickoff_utc).getTime()
+    countdown.value = formatCountdown(kickoffMs)
+    tickTimer = setInterval(() => {
+      countdown.value = formatCountdown(kickoffMs)
+    }, 1000)
+  } catch (e) {
+    if (e.name !== 'AbortError') console.warn('Failed to load next game:', e)
+  }
+}
+
 onMounted(async () => {
   await nextTick()
   pwField.value?.focus()
+  loadNextGame()
+})
+
+onUnmounted(() => {
+  if (tickTimer) clearInterval(tickTimer)
+  if (fetchController) fetchController.abort()
 })
 </script>
 
@@ -156,6 +197,7 @@ onMounted(async () => {
   font-size: 0.6875rem; font-weight: 600;
   letter-spacing: 0.18em;
   color: var(--ink-3);
+  line-height: 1;
 }
 
 .login-title {
@@ -175,9 +217,6 @@ onMounted(async () => {
   margin-bottom: 2rem;
   max-width: 38ch;
 }
-.hide-mobile { display: none; }
-@media (min-width: 500px) { .hide-mobile { display: inline; } }
-
 .login-form { display: flex; flex-direction: column; gap: 1rem; }
 .login-form .field { margin-bottom: 0; }
 .login-btn {

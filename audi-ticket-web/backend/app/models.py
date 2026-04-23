@@ -61,7 +61,8 @@ class CartSession(Base):
     
     # Task reference
     task_id = Column(Integer, nullable=True)
-    
+    event_id = Column(String(100), nullable=True, index=True)  # Cached from Task.event_id for profile-usage tracking after task deletion
+
     # Cookie data
     cookie_name = Column(String(100), nullable=False)
     cookie_value = Column(Text, nullable=False)
@@ -77,11 +78,13 @@ class CartSession(Base):
     total_time = Column(Float, nullable=True)  # Detection to cart time
     
     # ACO status
-    checkout_status = Column(String(30), default="pending")  # pending, billing_done, payment_pending, 3ds_waiting, completed, failed
+    checkout_status = Column(String(30), default="pending")  # pending, running, billing_done, payment_confirmed, completed, failed
+    billing_profile_id = Column(Integer, nullable=True, index=True)  # Profile used by ACO; set when dispatcher picks one
     client_secret = Column(Text, nullable=True)  # Stripe PI client secret
     payment_intent_id = Column(String(100), nullable=True)
     payment_method_id = Column(String(100), nullable=True)
     checkout_error = Column(Text, nullable=True)
+    invoice_url = Column(Text, nullable=True)  # getTaxInvoicePdf.php?... signed PDF link from success page
 
     # Timestamps
     created_at = Column(DateTime, default=func.now())

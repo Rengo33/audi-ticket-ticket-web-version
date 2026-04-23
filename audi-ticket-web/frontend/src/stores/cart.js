@@ -33,6 +33,19 @@ export const useCartStore = defineStore('cart', () => {
     }
   }
 
+  // In-place patch from a cart_update WS message. Keeps card identity stable.
+  function applyCartUpdate(data) {
+    const idx = carts.value.findIndex(c => c.id === data.cart_id || c.token === data.token)
+    if (idx === -1) { fetchCarts(); return }
+    carts.value[idx] = { ...carts.value[idx], ...data }
+  }
+
+  async function triggerCheckout(cartId, profileId) {
+    const res = await api.post(`/api/carts/${cartId}/checkout`, { billing_profile_id: profileId })
+    await fetchCarts()
+    return res
+  }
+
   // Depends only on `carts` + `tick` (to drop expired entries as time advances).
   // `tick` only invalidates the list when an entry actually expires — the filter
   // result is reference-stable otherwise.
@@ -44,5 +57,13 @@ export const useCartStore = defineStore('cart', () => {
       .sort((a, b) => a.expires_at - b.expires_at)
   })
 
-  return { carts, loading, error, tick, fetchCarts, triggerUpdate, validCarts }
+  // Completed ACO orders (any age) — kept visible so the user can download
+  // their invoice long after the 17-min cart hold has expired.
+  const completedCarts = computed(() =>
+    carts.value
+      .filter(c => c.checkout_status === 'completed' && c.invoice_url)
+      .sort((a, b) => b.expires_at - a.expires_at)
+  )
+
+  return { carts, loading, error, tick, fetchCarts, applyCartUpdate, triggerCheckout, triggerUpdate, validCarts, completedCarts }
 })

@@ -62,3 +62,6 @@ def init_db():
     _add_column_if_missing("cart_sessions", "payment_intent_id", "VARCHAR(100)")
     _add_column_if_missing("cart_sessions", "payment_method_id", "VARCHAR(100)")
     _add_column_if_missing("cart_sessions", "checkout_error", "TEXT")
+    _add_column_if_missing("cart_sessions", "invoice_url", "TEXT")
+    _add_column_if_missing("cart_sessions", "billing_profile_id", "INTEGER")
+    _add_column_if_missing("cart_sessions", "event_id", "VARCHAR(100)")

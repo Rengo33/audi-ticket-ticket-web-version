@@ -41,6 +41,13 @@ SUCCESS_PAGE_MARKERS = (
 )
 # Regiondo emits the public 12-digit order number as data-qa on .success-title.
 SUCCESS_ORDER_REF_RE = re.compile(r'class="success-title[^"]*"\s+data-qa="(\d+)"')
+# Signed invoice-PDF link on the success page. The `k` param is Regiondo's MD5
+# signature, so this URL is self-authenticating — no session cookie needed
+# to download the PDF once the URL is captured.
+INVOICE_URL_RE = re.compile(
+    r'https?://[^"\'\s<>]+/getTaxInvoicePdf\.php\?[^"\'\s<>]+',
+    re.IGNORECASE,
+)
 
 # Only one headless browser checkout at a time (server memory constraint)
 _browser_lock = asyncio.Lock()
@@ -103,6 +110,7 @@ class CheckoutResult:
     client_secret: str = ""
     order_url: str = ""
     order_ref: str = ""
+    invoice_url: str = ""
 
 
 class AutoCheckout:
@@ -283,7 +291,11 @@ class AutoCheckout:
             async with _browser_lock:
                 logger.info("[ACO] Launching browser for Stripe payment...")
                 async with async_playwright() as p:
-                    browser = await p.chromium.launch(headless=True, args=['--no-sandbox', '--disable-dev-shm-usage'])
+                    browser = await p.chromium.launch(
+                        headless=True,
+                        channel="chromium-headless-shell",
+                        args=['--no-sandbox', '--disable-dev-shm-usage'],
+                    )
                     page = await browser.new_page()
 
                     await page.goto(f"{AUDI_BASE}/checkout/cart", wait_until="domcontentloaded", timeout=20000)
@@ -410,6 +422,12 @@ class AutoCheckout:
             if any(m in html for m in SUCCESS_PAGE_MARKERS):
                 ref_match = SUCCESS_ORDER_REF_RE.search(html)
                 order_ref = ref_match.group(1) if ref_match else None
+                invoice_match = INVOICE_URL_RE.search(html)
+                invoice_url = invoice_match.group(0) if invoice_match else ""
+                if invoice_url:
+                    logger.info(f"[ACO] invoice URL captured: {invoice_url[:80]}...")
+                else:
+                    logger.warning("[ACO] success page found but invoice URL not present")
                 logger.info(f"[ACO] order placed, ref={order_ref}")
                 return CheckoutResult(
                     True, "completed",
@@ -418,6 +436,7 @@ class AutoCheckout:
                     payment_method_id=pm_id,
                     order_url=f"{AUDI_BASE}/checkout/onepage/success",
                     order_ref=order_ref or "",
+                    invoice_url=invoice_url,
                 )
 
             return CheckoutResult(

@@ -28,6 +28,67 @@ _games_cache = {
 CACHE_TTL = 900  # 15 minutes
 
 
+class NextGameResponse(BaseModel):
+    opponent: str
+    location: str
+    match_date: Optional[str]
+    match_time: Optional[str]
+    kickoff_utc: Optional[str]
+
+
+def _kickoff_utc(game: dict) -> Optional[datetime]:
+    """Combine match_date (YYYY-MM-DD) + match_time (HH:MM) as Europe/Berlin, return UTC naive."""
+    md, mt = game.get("match_date"), game.get("match_time")
+    if not md or not mt:
+        return None
+    try:
+        local = datetime.fromisoformat(f"{md}T{mt}:00").replace(tzinfo=ZoneInfo("Europe/Berlin"))
+        return local.astimezone(ZoneInfo("UTC")).replace(tzinfo=None)
+    except ValueError:
+        return None
+
+
+async def _ensure_games_cache() -> list:
+    """Return games list from cache or refresh if stale. Falls back to stale cache on scrape error."""
+    global _games_cache
+    now = datetime.utcnow()
+    if _games_cache["updated_at"] and (now - _games_cache["updated_at"]).total_seconds() < CACHE_TTL:
+        return _games_cache["data"]
+    try:
+        games = await get_bayern_games()
+        _games_cache["data"] = games
+        _games_cache["updated_at"] = now
+        logger.info(f"Refreshed games cache: {len(games)} games")
+        return games
+    except Exception as e:
+        logger.error(f"Error fetching games: {e}")
+        if _games_cache["data"]:
+            return _games_cache["data"]
+        raise HTTPException(status_code=500, detail="Failed to fetch games")
+
+
+@router.get("/next", response_model=Optional[NextGameResponse])
+async def next_game():
+    """Public headline for the Login scoreboard — next upcoming FCB fixture."""
+    try:
+        games = await _ensure_games_cache()
+    except HTTPException:
+        return None
+    now_utc = datetime.utcnow()
+    upcoming = [(g, _kickoff_utc(g)) for g in games]
+    upcoming = [(g, k) for g, k in upcoming if k and k > now_utc]
+    if not upcoming:
+        return None
+    g, k = min(upcoming, key=lambda gk: gk[1])
+    return NextGameResponse(
+        opponent=g["opponent"],
+        location=g["location"],
+        match_date=g.get("match_date"),
+        match_time=g.get("match_time"),
+        kickoff_utc=k.isoformat() + "Z",
+    )
+
+
 class GameResponse(BaseModel):
     id: str
     title: str
@@ -86,27 +147,8 @@ async def list_games(
     _: bool = Depends(get_current_user)
 ):
     """Get all FC Bayern games with their schedule status."""
-    global _games_cache
-    
-    # Check cache
-    now = datetime.utcnow()
-    if _games_cache["updated_at"] and (now - _games_cache["updated_at"]).total_seconds() < CACHE_TTL:
-        games = _games_cache["data"]
-    else:
-        # Refresh cache
-        try:
-            games = await get_bayern_games()
-            _games_cache["data"] = games
-            _games_cache["updated_at"] = now
-            logger.info(f"Refreshed games cache: {len(games)} games")
-        except Exception as e:
-            logger.error(f"Error fetching games: {e}")
-            # Return cached data if available
-            if _games_cache["data"]:
-                games = _games_cache["data"]
-            else:
-                raise HTTPException(status_code=500, detail="Failed to fetch games")
-    
+    games = await _ensure_games_cache()
+
     # Get scheduled tasks (group by game_id)
     scheduled = db.query(ScheduledTask).filter(
         ScheduledTask.status.in_(["scheduled", "triggered"])
@@ -169,39 +211,22 @@ async def schedule_game(
     _: bool = Depends(get_current_user)
 ):
     """Schedule a task for a game's sale date."""
-    global _games_cache
-    
-    # Find the game
-    game = None
-    for g in _games_cache.get("data", []):
-        if g['id'] == request.game_id:
-            game = g
-            break
-    
-    if not game:
-        # Try to refresh and find
-        games = await get_bayern_games()
-        _games_cache["data"] = games
-        _games_cache["updated_at"] = datetime.utcnow()
-        
-        for g in games:
-            if g['id'] == request.game_id:
-                game = g
-                break
-    
+    games = await _ensure_games_cache()
+    game = next((g for g in games if g['id'] == request.game_id), None)
+
     if not game:
         raise HTTPException(status_code=404, detail="Game not found")
     
     if not game['sale_date']:
         raise HTTPException(status_code=400, detail="Game has no sale date")
     
-    # Parse sale date and set time to 7:00 AM German time
+    # Parse sale date and set time to 5:55 AM German time (= 03:55 UTC in summer)
     sale_date = date.fromisoformat(game['sale_date'])
     german_tz = ZoneInfo("Europe/Berlin")
-    
-    # Create datetime at 7:00 AM German time
-    scheduled_local = datetime(sale_date.year, sale_date.month, sale_date.day, 7, 0, 0, tzinfo=german_tz)
-    
+
+    # Create datetime at 5:55 AM German time
+    scheduled_local = datetime(sale_date.year, sale_date.month, sale_date.day, 5, 55, 0, tzinfo=german_tz)
+
     # Convert to UTC for storage
     scheduled_utc = scheduled_local.astimezone(ZoneInfo("UTC")).replace(tzinfo=None)
     
@@ -223,7 +248,7 @@ async def schedule_game(
     db.commit()
     db.refresh(scheduled_task)
     
-    logger.info(f"Scheduled task for {game['title']} at {scheduled_utc} UTC (7:00 AM German)")
+    logger.info(f"Scheduled task for {game['title']} at {scheduled_utc} UTC (5:55 AM German)")
     
     return ScheduledTaskResponse.from_model(scheduled_task)
 

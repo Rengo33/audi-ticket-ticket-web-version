@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 
 from ..database import get_db
 from ..auth import get_current_user
-from ..models import BillingProfile
+from ..models import BillingProfile, CartSession
 from ..crypto import encrypt, decrypt
 
 router = APIRouter(prefix="/billing", tags=["billing"])
@@ -159,6 +159,48 @@ async def update_profile(
     db.commit()
     db.refresh(profile)
     return _to_response(profile)
+
+
+class ProfileUsageEntry(BaseModel):
+    profile_id: int
+    used: bool
+    used_cart_id: Optional[int] = None
+
+
+@router.get("/profiles/usage", response_model=List[ProfileUsageEntry])
+async def profile_usage(
+    event_id: Optional[str] = None,
+    db: Session = Depends(get_db),
+    _: bool = Depends(get_current_user),
+):
+    """Per-profile usage for a given event.
+
+    Profiles become 'used' the moment a CartSession with their ID transitions
+    to `completed` for this event_id. Reset happens implicitly when the event
+    changes.
+    """
+    profiles = db.query(BillingProfile.id).all()
+    used_map: dict[int, int] = {}
+    if event_id:
+        rows = (
+            db.query(CartSession.billing_profile_id, CartSession.id)
+            .filter(
+                CartSession.event_id == event_id,
+                CartSession.checkout_status == "completed",
+                CartSession.billing_profile_id.isnot(None),
+            )
+            .all()
+        )
+        for pid, cart_id in rows:
+            used_map.setdefault(pid, cart_id)
+    return [
+        ProfileUsageEntry(
+            profile_id=p.id,
+            used=p.id in used_map,
+            used_cart_id=used_map.get(p.id),
+        )
+        for p in profiles
+    ]
 
 
 @router.delete("/profiles/{profile_id}")

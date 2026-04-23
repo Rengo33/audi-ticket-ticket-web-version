@@ -25,15 +25,15 @@
     </div>
 
     <div v-else class="carts-grid">
-      <article v-for="cart in cartStore.validCarts" :key="cart.token" class="cart-card" :class="{ 'is-critical': getRemaining(cart) < 180 }">
+      <article v-for="cart in cartStore.validCarts" :key="cart.token" class="cart-card" :class="{ 'is-critical': getRemaining(cart) < 180 && cart.checkout_status === 'pending' }">
         <div class="cart-top">
           <div class="cart-timer">
             <span class="cart-timer-label mono">Expires in</span>
             <span class="cart-timer-value mono tnum">{{ formatTime(cart.expires_at) }}</span>
           </div>
-          <span class="badge" :class="getRemaining(cart) < 180 ? 'badge-failed' : 'badge-running'">
-            <span class="live-dot"></span>
-            {{ getRemaining(cart) < 180 ? 'CRITICAL' : 'HELD' }}
+          <span class="badge" :class="statusBadgeClass(cart)">
+            <span class="live-dot" v-if="isLiveStatus(cart)"></span>
+            {{ statusLabel(cart) }}
           </span>
         </div>
 
@@ -53,20 +53,81 @@
             <span v-if="cart.total_time" class="dot-sep">·</span>
             <span v-if="cart.total_time">{{ cart.total_time.toFixed(2) }}s</span>
           </div>
+          <div v-if="cart.billing_profile_name && cart.checkout_status === 'completed'" class="cart-profile mono">
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
+            {{ cart.billing_profile_name }}
+          </div>
+          <div v-if="cart.checkout_error" class="cart-error mono">{{ cart.checkout_error }}</div>
         </div>
 
         <div class="cart-actions">
           <button @click="copyCookie(cart)" class="btn btn-ghost">
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M21 10c-.5-3-2.7-5.3-5.5-6A9 9 0 1 0 21 14c0-.5 0-1 0-1.5-.5.5-1.5 1-2.5 1s-2-1-2-2c0-.8-.5-1.5-1.5-1.5S12 9.5 12 10.5c0 .8-.5 1.5-1.5 1.5S9 11.3 9 10.5"/></svg>
-            <span>Copy cookie</span>
+            <span>Cookie</span>
           </button>
-          <a :href="getCheckoutUrl(cart)" target="_blank" rel="noopener" class="btn btn-primary cart-cta">
+          <template v-if="cart.checkout_status === 'pending' || cart.checkout_status === 'failed'">
+            <button @click="openCheckoutModal(cart)" class="btn btn-primary cart-cta">
+              {{ cart.checkout_status === 'failed' ? 'Retry' : 'Checkout' }}
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
+            </button>
+            <a :href="getCheckoutUrl(cart)" target="_blank" rel="noopener" class="btn btn-ghost cart-cta">
+              Manual
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M7 17L17 7M7 7h10v10"/></svg>
+            </a>
+          </template>
+          <a v-else-if="cart.invoice_url" :href="cart.invoice_url" target="_blank" rel="noopener" class="btn btn-primary cart-cta">
+            Invoice
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M7 17L17 7M7 7h10v10"/></svg>
+          </a>
+          <a v-else :href="getCheckoutUrl(cart)" target="_blank" rel="noopener" class="btn btn-ghost cart-cta">
             Open checkout
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M7 17L17 7M7 7h10v10"/></svg>
           </a>
         </div>
       </article>
     </div>
+
+    <transition name="fade">
+      <div v-if="checkoutCart" class="modal-overlay" @click.self="closeCheckoutModal">
+        <div class="modal checkout-modal">
+          <header class="modal-header">
+            <div>
+              <div class="modal-title">Pick a profile</div>
+              <div class="modal-sub mono">Cart #{{ checkoutCart.id }} · {{ getDisplayName(checkoutCart.product_url) }}</div>
+            </div>
+            <button @click="closeCheckoutModal" class="icon-btn" aria-label="Close">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+            </button>
+          </header>
+          <div class="modal-body profile-picker">
+            <div v-if="profilesLoading" class="empty"><div class="empty-mark is-loading"><div class="spinner"></div></div><h3>Loading profiles…</h3></div>
+            <div v-else-if="profiles.length === 0" class="empty"><h3>No profiles yet</h3><p>Create a billing profile first.</p></div>
+            <button
+              v-else
+              v-for="p in profiles"
+              :key="p.id"
+              @click="selectProfile(p)"
+              class="profile-pick-row"
+              :class="{ 'is-used': usedProfileIds.has(p.id) }"
+              :disabled="submittingProfileId !== null"
+            >
+              <div class="profile-avatar mono">{{ initials(p.firstname, p.lastname) }}</div>
+              <div class="profile-pick-body">
+                <div class="profile-pick-top">
+                  <span class="profile-pick-name">{{ p.name }}</span>
+                  <span v-if="usedProfileIds.has(p.id)" class="used-tag mono">USED</span>
+                </div>
+                <div class="profile-pick-sub mono">{{ p.firstname }} {{ p.lastname }} · {{ p.email }}</div>
+              </div>
+              <div class="profile-pick-chevron" v-if="submittingProfileId !== p.id">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 6l6 6-6 6"/></svg>
+              </div>
+              <div v-else class="spinner"></div>
+            </button>
+          </div>
+        </div>
+      </div>
+    </transition>
 
     <transition name="toast">
       <div v-if="toastMessage" class="toast mono">{{ toastMessage }}</div>
@@ -77,10 +138,18 @@
 <script setup>
 import { onMounted, onUnmounted, ref } from 'vue';
 import { useCartStore } from '../stores/cart';
+import { api } from '../stores/api';
 import { priceCategoryLabel } from '../constants';
 
 const cartStore = useCartStore();
 const toastMessage = ref('');
+
+// Checkout modal state
+const checkoutCart = ref(null);
+const profiles = ref([]);
+const usedProfileIds = ref(new Set());
+const profilesLoading = ref(false);
+const submittingProfileId = ref(null);
 
 const getDisplayName = (url) => {
   try {
@@ -96,7 +165,7 @@ const getCheckoutUrl = (cart) => cart.token ? `/checkout/${cart.token}/cart` : '
 
 const flash = (msg) => {
   toastMessage.value = msg;
-  setTimeout(() => { toastMessage.value = ''; }, 1800);
+  setTimeout(() => { toastMessage.value = ''; }, 2400);
 };
 
 const copyToClipboard = (text) => {
@@ -116,6 +185,75 @@ const copyCookie = async (cart) => {
     flash('Cookie copied');
   } catch {
     flash('Error copying cookie');
+  }
+};
+
+// Status chip helpers — one source of truth for label + color.
+const STATUS_MAP = {
+  pending: { label: 'HELD', cls: 'badge-running', live: true },
+  running: { label: 'RUNNING', cls: 'badge-running', live: true },
+  billing_done: { label: 'BILLING ✓', cls: 'badge-running', live: true },
+  payment_confirmed: { label: 'PAYMENT ✓', cls: 'badge-running', live: true },
+  completed: { label: 'COMPLETED', cls: 'badge-success', live: false },
+  failed: { label: 'FAILED', cls: 'badge-failed', live: false },
+};
+const statusLabel = (cart) => {
+  if (cart.checkout_status === 'pending' && getRemaining(cart) < 180) return 'CRITICAL';
+  return (STATUS_MAP[cart.checkout_status] || STATUS_MAP.pending).label;
+};
+const statusBadgeClass = (cart) => {
+  if (cart.checkout_status === 'pending' && getRemaining(cart) < 180) return 'badge-failed';
+  return (STATUS_MAP[cart.checkout_status] || STATUS_MAP.pending).cls;
+};
+const isLiveStatus = (cart) => (STATUS_MAP[cart.checkout_status] || STATUS_MAP.pending).live;
+
+const initials = (first = '', last = '') => ((first[0] || '') + (last[0] || '')).toUpperCase() || '—';
+
+const openCheckoutModal = async (cart) => {
+  checkoutCart.value = cart;
+  profilesLoading.value = true;
+  profiles.value = [];
+  usedProfileIds.value = new Set();
+  try {
+    const [profs, usage] = await Promise.all([
+      api.get('/api/billing/profiles'),
+      api.get(`/api/billing/profiles/usage?event_id=${encodeURIComponent(cart.event_id || '')}`),
+    ]);
+    profiles.value = profs;
+    usedProfileIds.value = new Set(usage.filter(u => u.used).map(u => u.profile_id));
+  } catch (e) {
+    flash('Failed to load profiles');
+    checkoutCart.value = null;
+  } finally {
+    profilesLoading.value = false;
+  }
+};
+
+const closeCheckoutModal = () => {
+  if (submittingProfileId.value !== null) return;
+  checkoutCart.value = null;
+  profiles.value = [];
+  usedProfileIds.value = new Set();
+};
+
+const selectProfile = async (profile) => {
+  if (!checkoutCart.value) return;
+  if (usedProfileIds.value.has(profile.id)) {
+    if (!confirm(`${profile.name} already checked out for this event. Run again anyway?`)) return;
+  }
+  submittingProfileId.value = profile.id;
+  try {
+    const res = await cartStore.triggerCheckout(checkoutCart.value.id, profile.id);
+    if (res && res.success) {
+      flash(`Checkout started with ${profile.name}`);
+    } else {
+      flash(`Checkout failed: ${res?.message || 'unknown'}`);
+    }
+    checkoutCart.value = null;
+  } catch (e) {
+    flash(`Error: ${e.message || 'request failed'}`);
+  } finally {
+    submittingProfileId.value = null;
   }
 };
 
@@ -255,6 +393,73 @@ onUnmounted(() => { if (timer) clearInterval(timer); });
   display: flex; gap: 6px; flex-wrap: wrap;
 }
 .dot-sep { color: var(--ink-4); }
+
+.cart-profile {
+  margin-top: 8px;
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--ok) 14%, transparent);
+  color: var(--ok);
+  font-size: 0.6875rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+.cart-error {
+  margin-top: 8px;
+  font-size: 0.6875rem;
+  color: var(--bad);
+  word-break: break-word;
+}
+
+/* Profile picker modal */
+.checkout-modal { max-width: 460px; }
+.profile-picker { padding: 8px; display: flex; flex-direction: column; gap: 6px; }
+.profile-pick-row {
+  display: flex; align-items: center; gap: 12px;
+  padding: 10px 12px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  cursor: pointer;
+  text-align: left;
+  transition: border-color 0.15s, background 0.15s;
+  font-family: inherit;
+}
+.profile-pick-row:hover:not(:disabled) {
+  border-color: color-mix(in oklab, var(--ink) 30%, var(--line));
+  background: var(--surface-2, var(--surface));
+}
+.profile-pick-row:disabled { opacity: 0.6; cursor: not-allowed; }
+.profile-pick-row.is-used { background: color-mix(in oklab, var(--warn) 6%, transparent); }
+.profile-avatar {
+  width: 36px; height: 36px; flex-shrink: 0;
+  border-radius: 50%;
+  background: var(--line-soft);
+  color: var(--ink-2);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 0.75rem; font-weight: 700;
+  letter-spacing: 0.04em;
+}
+.profile-pick-body { flex: 1; min-width: 0; }
+.profile-pick-top { display: flex; align-items: center; gap: 8px; }
+.profile-pick-name { font-size: 0.9375rem; font-weight: 700; color: var(--ink); }
+.used-tag {
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: var(--warn);
+  color: white;
+  font-size: 0.625rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+}
+.profile-pick-sub {
+  font-size: 0.75rem;
+  color: var(--ink-3);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  margin-top: 2px;
+}
+.profile-pick-chevron { color: var(--ink-4); flex-shrink: 0; }
 
 .cart-actions {
   padding: 10px 12px 12px;
