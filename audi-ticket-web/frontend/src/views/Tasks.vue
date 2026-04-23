@@ -1,5 +1,6 @@
 <template>
   <div>
+    <PushBanner />
     <div class="view-head">
       <div>
         <div class="eyebrow">MONITORING</div>
@@ -194,6 +195,7 @@ import { ref, onMounted } from 'vue';
 import { useTaskStore } from '../stores/tasks';
 import { api } from '../stores/api';
 import { PRICE_CATEGORIES, priceCategoryLabel } from '../constants';
+import PushBanner from '../components/PushBanner.vue';
 
 const taskStore = useTaskStore();
 const showModal = ref(false);

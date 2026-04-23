@@ -167,3 +167,15 @@ class BillingProfile(Base):
     card_last4 = Column(String(4), default="")  # For display
 
     created_at = Column(DateTime, default=func.now())
+
+
+class PushSubscription(Base):
+    """Web Push subscription — one row per browser/device."""
+    __tablename__ = "push_subscriptions"
+
+    endpoint = Column(Text, primary_key=True)  # globally unique per browser+device
+    p256dh = Column(Text, nullable=False)
+    auth = Column(Text, nullable=False)
+    user_agent = Column(String(300), nullable=True)
+    created_at = Column(DateTime, default=func.now())
+    last_sent_at = Column(DateTime, nullable=True)

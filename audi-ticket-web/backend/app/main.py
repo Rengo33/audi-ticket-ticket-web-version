@@ -9,8 +9,9 @@ from fastapi.staticfiles import StaticFiles
 
 from .config import get_settings
 from .database import init_db, SessionLocal
-from .api import auth, tasks, checkout, websocket, games, billing
+from .api import auth, tasks, checkout, websocket, games, billing, push
 from .bot.monitor import task_manager
+from .bot import web_push
 from .models import Task, TaskStatus
 from .scheduler import scheduler
 
@@ -53,10 +54,11 @@ async def lifespan(app: FastAPI):
     logging.info("Task scheduler started")
 
     yield
-    
+
     # Shutdown
     logging.info("Shutting down...")
     await scheduler.stop()
+    await web_push.stop_worker()
 
 
 app = FastAPI(
@@ -79,6 +81,7 @@ app.include_router(auth.router, prefix="/api")
 app.include_router(tasks.router, prefix="/api")
 app.include_router(games.router, prefix="/api")
 app.include_router(billing.router, prefix="/api")
+app.include_router(push.router, prefix="/api")
 app.include_router(checkout.router)
 app.include_router(websocket.router)
 

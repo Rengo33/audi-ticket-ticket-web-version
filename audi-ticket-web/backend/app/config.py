@@ -20,6 +20,13 @@ class Settings(BaseSettings):
     # Discord
     discord_webhook_url: str = ""
 
+    # Web Push (VAPID). Generate once with `python -m scripts.generate_vapid_keys`
+    # and paste into the .env. The contact is sent to push services for abuse
+    # reports; a plain email works (no mailto: prefix needed, pywebpush adds it).
+    vapid_public_key: str = ""
+    vapid_private_key: str = ""
+    vapid_contact_email: str = ""
+
     # Base URL for external links (checkout, Discord messages)
     base_url: str = "http://localhost"
 
