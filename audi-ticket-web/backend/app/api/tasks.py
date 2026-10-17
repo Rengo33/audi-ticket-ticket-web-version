@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from ..database import get_db
 from ..auth import get_current_user
-from ..models import Task, TaskStatus, TaskLog, CartSession
+from ..models import Task, TaskStatus, TaskLog, CartSession, ScheduledTask
 from ..schemas import TaskCreate, TaskResponse, TaskListResponse, TaskLogResponse
 from ..bot.monitor import task_manager
 
@@ -207,12 +207,20 @@ async def delete_task(
     if not task:
         raise HTTPException(404, "Task not found")
     
-    # Stop if running
-    if task.status == TaskStatus.RUNNING.value:
+    # Stop anything with a live worker — a WAITING task still holds a re-cart
+    # timer that would otherwise insert a CartSession for a deleted task later.
+    if task.status in (TaskStatus.RUNNING.value, TaskStatus.WAITING.value) \
+            or task_id in task_manager.active_tasks:
         await task_manager.stop_task(task_id, db)
-    
-    # Delete logs
+
+    # Do the ondelete work in the app: the existing production DB predates the
+    # ForeignKey declarations (create_all never alters tables), so SQLite won't
+    # cascade / SET NULL for us there.
     db.query(TaskLog).filter(TaskLog.task_id == task_id).delete()
+    db.query(CartSession).filter(CartSession.task_id == task_id).update(
+        {CartSession.task_id: None}, synchronize_session=False)
+    db.query(ScheduledTask).filter(ScheduledTask.task_id == task_id).update(
+        {ScheduledTask.task_id: None}, synchronize_session=False)
     
     # Delete task
     db.delete(task)

@@ -142,7 +142,7 @@
 </template>
 
 <script setup>
-import { onMounted, onUnmounted, ref } from 'vue';
+import { onMounted, onUnmounted, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { useCartStore } from '../stores/cart';
 import { api } from '../stores/api';
@@ -294,19 +294,29 @@ const getProgress = (expiryDate) => {
 };
 
 let timer;
+// ?pick=<cartId> deep link (push "tap to pick a profile"). Handled on mount AND
+// on query change — a push tapped while Carts is already open only changes the
+// query, so the component is reused and onMounted never re-runs.
+async function handlePick(raw) {
+  const pickId = Number(raw);
+  if (!Number.isFinite(pickId) || pickId <= 0) return;
+  let cart = cartStore.carts.find(c => c.id === pickId);
+  if (!cart) {  // arrived after our last fetch (e.g. via WebSocket) — refresh once
+    await cartStore.fetchCarts();
+    cart = cartStore.carts.find(c => c.id === pickId);
+  }
+  if (cart && (cart.checkout_status === 'pending' || cart.checkout_status === 'failed')) {
+    openCheckoutModal(cart);
+  }
+  router.replace({ path: '/carts' });
+}
+
 onMounted(async () => {
   await cartStore.fetchCarts();
   timer = setInterval(() => { cartStore.triggerUpdate(); }, 1000);
-
-  const pickId = Number(route.query.pick);
-  if (Number.isFinite(pickId) && pickId > 0) {
-    const cart = cartStore.carts.find(c => c.id === pickId);
-    if (cart && (cart.checkout_status === 'pending' || cart.checkout_status === 'failed')) {
-      openCheckoutModal(cart);
-    }
-    router.replace({ path: '/carts' });
-  }
+  await handlePick(route.query.pick);
 });
+watch(() => route.query.pick, (v) => { if (v) handlePick(v); });
 onUnmounted(() => { if (timer) clearInterval(timer); });
 </script>
 

@@ -13,7 +13,7 @@ from datetime import datetime
 
 from ..database import SessionLocal
 from ..models import Task, ReleaseDetector
-from .scraper import get_listing_product_urls
+from .scraper import get_listing_product_urls, _normalize
 from .monitor import task_manager
 from .discord import send_discord_new_event
 
@@ -59,21 +59,99 @@ class ReleaseDetectorManager:
             self._task = None
         return True
 
-    async def _launch_task(self, url: str, cfg: ReleaseDetector, db) -> int:
-        task = Task(
-            product_url=url,
-            quantity=cfg.quantity or 1,
-            num_threads=cfg.num_threads or 1,
-            price_category=cfg.price_category or 0,
-            auto_checkout=bool(cfg.auto_checkout),
-            billing_profile_id=cfg.billing_profile_id,
-        )
-        db.add(task)
+    async def _launch_task(self, url: str, cfg: ReleaseDetector) -> int:
+        """Create + start a task in its OWN session, so a failed launch (e.g. a
+        SQLite lock on commit) can't leave the detector's session in a failed
+        transaction and take the whole loop down with it."""
+        db = SessionLocal()
+        try:
+            task = Task(
+                product_url=url,
+                quantity=cfg.quantity or 1,
+                num_threads=cfg.num_threads or 1,
+                price_category=cfg.price_category or 0,
+                auto_checkout=bool(cfg.auto_checkout),
+                billing_profile_id=cfg.billing_profile_id,
+            )
+            db.add(task)
+            db.commit()
+            db.refresh(task)
+            await task_manager.start_task(task, db)
+            logger.info(f"[Detector] new product {url} -> task {task.id}")
+            return task.id
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+
+    async def _scan_once(self, db) -> float:
+        """One detector iteration. Returns the sleep interval; raises
+        StopAsyncIteration when the detector was switched off."""
+        cfg = self._get_cfg(db)
+        if not cfg.active:
+            raise StopAsyncIteration
+        interval = max(3.0, cfg.poll_interval or 10.0)
+        known = {_normalize(u) for u in json.loads(cfg.known_urls or "[]")}
+
+        try:
+            urls = set(await get_listing_product_urls())
+        except Exception as e:
+            # Partial/failed listing: skip the round entirely — never seed or
+            # diff on an incomplete product set.
+            cfg.error_message = f"scrape failed: {e}"
+            cfg.last_scan_at = datetime.utcnow()
+            db.commit()
+            await self._broadcast(cfg)
+            return interval
+
+        cfg.scan_count = (cfg.scan_count or 0) + 1
+        cfg.last_scan_at = datetime.utcnow()
+        cfg.error_message = None
+
+        acted = []
+        new = sorted(urls - known) if known else []
+        if not known:
+            # First scan after activation: seed only, never cart what exists.
+            logger.info(f"[Detector] seeded {len(urls)} existing products")
+        elif len(new) > MAX_NEW_PER_SCAN:
+            # Anomaly (listing glitch / shop rebuild): absorb via the union
+            # below, but don't fire tasks or pings.
+            logger.warning(f"[Detector] {len(new)} new URLs in one scan — absorbing without acting")
+            cfg.error_message = f"absorbed {len(new)} new at once (not carted)"
+        else:
+            # "+" joins AND-terms: "dortmund+ingolstadt" matches a URL containing
+            # BOTH. No terms (empty keyword) matches every new product.
+            terms = [t for t in (cfg.keyword or "").lower().replace(" ", "").split("+") if t]
+            for url in new:
+                lu = url.lower()
+                tid = None
+                if all(t in lu for t in terms):
+                    try:
+                        tid = await self._launch_task(url, cfg)
+                    except Exception as e:
+                        logger.error(f"[Detector] failed to launch {url}: {e}")
+                        cfg.error_message = f"launch failed for {url}: {e}"
+                # A found event always pings Discord; carted flag shows whether it
+                # matched the filter and a task started.
+                try:
+                    await send_discord_new_event(url, carted=tid is not None)
+                except Exception as e:
+                    logger.warning(f"[Detector] discord ping failed: {e}")
+                if tid is not None:
+                    acted.append({"url": url, "at": datetime.utcnow().isoformat(), "task_id": tid})
+
+        if acted:
+            cfg.last_new_found_at = datetime.utcnow()
+            log = json.loads(cfg.events_log or "[]")
+            cfg.events_log = json.dumps((acted + log)[:20])
+
+        # UNION, never overwrite: once a URL is known it stays known, so a scrape
+        # that transiently misses products can't resurface them as "new".
+        cfg.known_urls = json.dumps(sorted(known | urls))
         db.commit()
-        db.refresh(task)
-        await task_manager.start_task(task, db)
-        logger.info(f"[Detector] new product {url} -> task {task.id}")
-        return task.id
+        await self._broadcast(cfg, acted)
+        return interval
 
     async def _loop(self):
         logger.info("[Detector] loop started")
@@ -82,79 +160,23 @@ class ReleaseDetectorManager:
                 interval = 10.0
                 db = SessionLocal()
                 try:
-                    cfg = self._get_cfg(db)
-                    if not cfg.active:
-                        logger.info("[Detector] inactive — loop exiting")
-                        return
-                    interval = max(3.0, cfg.poll_interval or 10.0)
-                    known = set(json.loads(cfg.known_urls or "[]"))
-
+                    interval = await self._scan_once(db)
+                except StopAsyncIteration:
+                    logger.info("[Detector] inactive — loop exiting")
+                    return
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    # One bad iteration (DB lock, unexpected HTML) must not kill
+                    # the detector: roll back, record, try again next tick.
+                    logger.error(f"[Detector] scan iteration failed: {e}")
+                    db.rollback()
                     try:
-                        urls = set(await get_listing_product_urls())
-                    except Exception as e:
-                        cfg.error_message = f"scrape failed: {e}"
-                        cfg.last_scan_at = datetime.utcnow()
+                        cfg = self._get_cfg(db)
+                        cfg.error_message = f"scan failed: {e}"
                         db.commit()
-                        await self._broadcast(cfg)
-                        await asyncio.sleep(interval)
-                        continue
-
-                    cfg.scan_count = (cfg.scan_count or 0) + 1
-                    cfg.last_scan_at = datetime.utcnow()
-                    cfg.error_message = None
-
-                    acted = []
-                    new = sorted(urls - known) if known else []
-                    if not known:
-                        # First scan after activation: seed only, never cart what
-                        # already exists.
-                        logger.info(f"[Detector] seeded {len(urls)} existing products")
-                    elif len(new) > MAX_NEW_PER_SCAN:
-                        # Anomaly (listing glitch / shop rebuild). Absorb into known
-                        # via the union below, but don't fire tasks or pings.
-                        logger.warning(
-                            f"[Detector] {len(new)} new URLs in one scan — anomaly, "
-                            f"absorbing without acting"
-                        )
-                        cfg.error_message = f"absorbed {len(new)} new at once (not carted)"
-                    else:
-                        # "+" joins AND-terms: "dortmund+ingolstadt" matches a URL
-                        # containing BOTH. No terms (empty keyword) matches every
-                        # new product.
-                        terms = [t for t in (cfg.keyword or "").lower().replace(" ", "").split("+") if t]
-                        for url in new:
-                            lu = url.lower()
-                            matched = all(t in lu for t in terms)
-                            tid = None
-                            if matched:
-                                try:
-                                    tid = await self._launch_task(url, cfg, db)
-                                except Exception as e:
-                                    logger.error(f"[Detector] failed to launch {url}: {e}")
-                            # A found event always pings Discord; carted flag shows
-                            # whether it matched the filter and a task started.
-                            try:
-                                await send_discord_new_event(url, carted=tid is not None)
-                            except Exception as e:
-                                logger.warning(f"[Detector] discord ping failed: {e}")
-                            if tid is not None:
-                                acted.append({
-                                    "url": url,
-                                    "at": datetime.utcnow().isoformat(),
-                                    "task_id": tid,
-                                })
-
-                    if acted:
-                        cfg.last_new_found_at = datetime.utcnow()
-                        log = json.loads(cfg.events_log or "[]")
-                        cfg.events_log = json.dumps((acted + log)[:20])
-
-                    # UNION, never overwrite: once a URL is known it stays known, so
-                    # a scrape that transiently misses products can't resurface them
-                    # as "new". `known` only ever grows.
-                    cfg.known_urls = json.dumps(sorted(known | urls))
-                    db.commit()
-                    await self._broadcast(cfg, acted)
+                    except Exception:
+                        db.rollback()
                 finally:
                     db.close()
                 await asyncio.sleep(interval)
@@ -162,12 +184,14 @@ class ReleaseDetectorManager:
             logger.info("[Detector] loop cancelled")
             raise
         except Exception as e:
+            # Truly unexpected: stop cleanly and say so, so the UI never shows
+            # "active" for a dead loop.
             logger.error(f"[Detector] loop crashed: {e}")
-            # Mark inactive so the watchdog/UI reflects reality.
             db = SessionLocal()
             try:
                 cfg = self._get_cfg(db)
-                cfg.error_message = f"loop crashed: {e}"
+                cfg.active = False
+                cfg.error_message = f"loop crashed (stopped): {e}"
                 db.commit()
             finally:
                 db.close()

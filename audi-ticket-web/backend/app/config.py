@@ -48,9 +48,11 @@ class Settings(BaseSettings):
         env_file_encoding = "utf-8"
 
 
+# Every default that ships in the repo (pydantic defaults AND docker-compose's
+# `${VAR:-default}` fallbacks) — any of them means the secret is public.
 _DEFAULT_SECRETS = {
-    "secret_key": "your-secret-key-change-in-production",
-    "app_password": "changeme",
+    "secret_key": {"your-secret-key-change-in-production", "change-this-secret"},
+    "app_password": {"changeme"},
 }
 
 
@@ -61,7 +63,7 @@ def get_settings() -> Settings:
     so booting with the published default would mean every encrypted card in
     the DB is decryptable from the repo source."""
     s = Settings()
-    leaked = [k for k, v in _DEFAULT_SECRETS.items() if getattr(s, k) == v]
+    leaked = [k for k, v in _DEFAULT_SECRETS.items() if getattr(s, k) in v]
     if leaked:
         raise RuntimeError(
             f"Refusing to start: {', '.join(leaked)} still at hardcoded default. "

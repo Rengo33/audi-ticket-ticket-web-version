@@ -47,10 +47,10 @@ export function useWebSocket() {
     ws.onclose = (ev) => {
       connected.value = false
       ws = null
-      // 4401 / 4403 ≈ auth-rejection close codes (server sets these on
-      // expired / invalid tokens). No point retrying with the same token —
-      // the auth store will redirect to /login on the next API call anyway.
-      if (ev.code === 4401 || ev.code === 4403) return
+      // 4001 = server auth rejection (api/websocket.py). No point retrying
+      // with the same token — the auth store redirects to /login on the next
+      // API call anyway.
+      if (ev.code === 4001) return
       failCount++
       if (failCount > MAX_RECONNECTS) {
         console.warn(`WS giving up after ${MAX_RECONNECTS} reconnect attempts`)

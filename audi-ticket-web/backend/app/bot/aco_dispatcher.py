@@ -24,6 +24,17 @@ from .checkout import AutoCheckout
 from .discord import send_discord_aco_update
 from .web_push import send_push
 
+# asyncio keeps only weak refs to tasks — a fire-and-forget create_task can be
+# garbage-collected mid-run. Hold a strong ref until it finishes.
+_background: set = set()
+
+
+def _spawn(coro):
+    t = asyncio.create_task(coro)
+    _background.add(t)
+    t.add_done_callback(_background.discard)
+    return t
+
 logger = logging.getLogger(__name__)
 
 
@@ -178,11 +189,12 @@ async def run_single_checkout(cart: CartSession, profile: BillingProfile, db: Se
         if order_result.success:
             await _log(task_id, "success", f"ACO: Cart {cart.id} — {order_result.message}", db)
             cart.checkout_status = "completed"
+            if order_result.invoice_url:
+                cart.invoice_url = order_result.invoice_url
             db.commit()
             await _broadcast_cart_update(cart)
-            asyncio.create_task(
-                _poll_invoice_in_background(cart.id, cart.cookie_name, cart.cookie_value)
-            )
+            if not cart.invoice_url:
+                _spawn(_poll_invoice_in_background(cart.id, cart.cookie_name, cart.cookie_value))
             await send_discord_aco_update(
                 product_url, "completed",
                 profile_name=profile.name, profile_email=profile.email,

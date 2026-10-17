@@ -30,7 +30,12 @@ if ('serviceWorker' in navigator) {
 
   navigator.serviceWorker.addEventListener('message', (event) => {
     const msg = event.data
-    if (msg && msg.type === MSG_SW_NAVIGATE) navigateTo(msg.url)
+    if (msg && msg.type === MSG_SW_NAVIGATE) {
+      navigateTo(msg.url)
+      // The live window handled it — drop the cold-start stash so it doesn't
+      // replay on the next launch.
+      if ('caches' in window) caches.open(NAV_CACHE).then((c) => c.delete(NAV_KEY)).catch(() => {})
+    }
   })
 
   // iOS PWA cold-start drops the SW's postMessage; recover via Cache Storage.

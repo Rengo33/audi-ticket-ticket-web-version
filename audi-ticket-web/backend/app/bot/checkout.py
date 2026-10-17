@@ -510,10 +510,13 @@ class AutoCheckout:
                             order_ref=order_ref or "",
                         )
 
-                logger.info(f"[ACO] order placed, ref={order_ref}")
-                # invoice_url is filled in by a background task in
-                # aco_dispatcher — Regiondo generates the PDF async and we
-                # don't want to hold the dispatcher lock for 30+ s.
+                # The success page usually carries the signed invoice link already
+                # — grab it here, because Regiondo may clear the last-order state
+                # once this page is rendered. Only if it's missing does the
+                # dispatcher fall back to polling taxinvoices in the background.
+                invoice_match = INVOICE_URL_RE.search(html)
+                invoice_url = invoice_match.group(0) if invoice_match else ""
+                logger.info(f"[ACO] order placed, ref={order_ref}, invoice={'yes' if invoice_url else 'pending'}")
                 return CheckoutResult(
                     True, "completed",
                     f"Order placed (#{order_ref or 'unknown'})",
@@ -521,6 +524,7 @@ class AutoCheckout:
                     payment_method_id=pm_id,
                     order_url=f"{AUDI_BASE}/checkout/onepage/success",
                     order_ref=order_ref or "",
+                    invoice_url=invoice_url,
                 )
 
             return CheckoutResult(

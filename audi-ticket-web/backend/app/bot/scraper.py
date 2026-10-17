@@ -90,7 +90,7 @@ class BayernScraper:
             collect(first.text)
 
             last_page = max(
-                (int(n) for n in re.findall(r'[?&]p=(\d{1,2})"', first.text)),
+                (int(n) for n in re.findall(r'[?&;]p=(\d{1,2})"', first.text)),
                 default=1,
             )
             if last_page > 1:
@@ -333,7 +333,7 @@ async def get_listing_product_urls() -> List[str]:
             raise RuntimeError(f"listing page 1 returned {first.status_code}")
         htmls.append(first.text)
         last_page = max(
-            (int(n) for n in re.findall(r'[?&]p=(\d{1,2})"', first.text)),
+            (int(n) for n in re.findall(r'[?&;]p=(\d{1,2})"', first.text)),
             default=1,
         )
         if last_page > 1:
@@ -341,9 +341,15 @@ async def get_listing_product_urls() -> List[str]:
                 *(s.get(page_url(p)) for p in range(2, min(last_page, 9) + 1)),
                 return_exceptions=True,
             )
-            for r in rest:
-                if not isinstance(r, Exception) and r.status_code == 200:
-                    htmls.append(r.text)
+            # All-or-nothing: a partial listing makes products on the missing
+            # page look "new" next scan (or never seeded), which auto-carts old
+            # events. Fail the whole scrape so the detector skips this round.
+            for p, r in enumerate(rest, start=2):
+                if isinstance(r, Exception):
+                    raise RuntimeError(f"listing page {p} failed: {r}")
+                if r.status_code != 200:
+                    raise RuntimeError(f"listing page {p} returned {r.status_code}")
+                htmls.append(r.text)
 
     # Non-product paths that live at the site root alongside product slugs.
     NAV = (
@@ -369,13 +375,19 @@ async def get_listing_product_urls() -> List[str]:
             r"window\.location\s*=\s*'(" + re.escape(BASE_URL) + r"/[^']+)'", html
         ):
             if is_product(m):
-                urls.add(m)
+                urls.add(_normalize(m))
         # Union with every product anchor on the page — the regex is lossy on its
         # own, and an incomplete set makes old products look "new" to the detector.
         for link in BeautifulSoup(html, "html.parser").find_all("a", href=True):
             if is_product(link["href"]):
-                urls.add(link["href"])
+                urls.add(_normalize(link["href"]))
     return sorted(urls)
+
+
+def _normalize(u: str) -> str:
+    """Canonical product URL: drop query/fragment and trailing slash, so the
+    same product never shows up twice under different suffixes."""
+    return u.split("#", 1)[0].split("?", 1)[0].rstrip("/")
 
 
 # For testing
