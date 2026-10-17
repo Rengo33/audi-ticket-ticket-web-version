@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 72 72">
+  <!-- Monochrome white on transparent — Android tints with theme color -->
+  <text x="36" y="36" text-anchor="middle" dominant-baseline="central"
+        font-family="Helvetica, Arial, sans-serif" font-weight="900" font-size="56"
+        letter-spacing="-2" fill="#ffffff">A</text>
+</svg>

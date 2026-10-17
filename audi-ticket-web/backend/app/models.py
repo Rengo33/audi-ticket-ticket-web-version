@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Float, DateTime, Text, Enum as SQLEnum
+from sqlalchemy import Column, ForeignKey, Integer, String, Float, DateTime, Text, Boolean, Enum as SQLEnum
 from sqlalchemy.sql import func
 from datetime import datetime
 import enum
@@ -11,6 +11,7 @@ class TaskStatus(str, enum.Enum):
     PENDING = "pending"
     RUNNING = "running"
     SUCCESS = "success"
+    WAITING = "waiting"
     FAILED = "failed"
     STOPPED = "stopped"
 
@@ -25,7 +26,10 @@ class Task(Base):
     product_url = Column(String(500), nullable=False)
     quantity = Column(Integer, default=1)
     num_threads = Column(Integer, default=1)
-    
+    price_category = Column(Integer, default=0)
+    auto_checkout = Column(Boolean, default=False)
+    billing_profile_id = Column(String(100), nullable=True)  # Comma-separated profile IDs for round-robin
+
     # Status
     status = Column(String(20), default=TaskStatus.PENDING.value)
     scan_count = Column(Integer, default=0)
@@ -55,9 +59,13 @@ class CartSession(Base):
     # Link token (for /checkout/{token} URL)
     token = Column(String(64), unique=True, index=True, nullable=False)
     
-    # Task reference
-    task_id = Column(Integer, nullable=True)
-    
+    # Task reference. SET NULL on delete: keep orphaned carts so the user can
+    # still manual-checkout an active hold even after the task is removed.
+    # event_id is cached separately so profile-usage tracking survives the
+    # nulled task_id.
+    task_id = Column(Integer, ForeignKey("tasks.id", ondelete="SET NULL"), nullable=True)
+    event_id = Column(String(100), nullable=True, index=True)
+
     # Cookie data
     cookie_name = Column(String(100), nullable=False)
     cookie_value = Column(Text, nullable=False)
@@ -69,8 +77,18 @@ class CartSession(Base):
     
     # Metadata
     quantity = Column(Integer, default=1)
+    price_category = Column(Integer, default=0)
     total_time = Column(Float, nullable=True)  # Detection to cart time
     
+    # ACO status
+    checkout_status = Column(String(30), default="pending")  # pending, running, billing_done, payment_confirmed, completed, failed
+    billing_profile_id = Column(Integer, nullable=True, index=True)  # Profile used by ACO; set when dispatcher picks one
+    client_secret = Column(Text, nullable=True)  # Stripe PI client secret
+    payment_intent_id = Column(String(100), nullable=True)
+    payment_method_id = Column(String(100), nullable=True)
+    checkout_error = Column(Text, nullable=True)
+    invoice_url = Column(Text, nullable=True)  # getTaxInvoicePdf.php?... signed PDF link from success page
+
     # Timestamps
     created_at = Column(DateTime, default=func.now())
     expires_at = Column(DateTime, nullable=False)  # Cart hold expiry
@@ -82,8 +100,9 @@ class TaskLog(Base):
     __tablename__ = "task_logs"
     
     id = Column(Integer, primary_key=True, index=True)
-    task_id = Column(Integer, nullable=False, index=True)
-    
+    # CASCADE: logs are tied to the task lifecycle; deleting the task drops them.
+    task_id = Column(Integer, ForeignKey("tasks.id", ondelete="CASCADE"), nullable=False, index=True)
+
     level = Column(String(20), default="info")  # info, warning, error, success
     message = Column(Text, nullable=False)
     
@@ -104,14 +123,97 @@ class ScheduledTask(Base):
     # Task configuration
     quantity = Column(Integer, default=4)
     num_threads = Column(Integer, default=5)
-    
+    price_category = Column(Integer, default=0)
+    auto_checkout = Column(Boolean, default=False)
+    billing_profile_id = Column(String(100), nullable=True)  # Comma-separated profile IDs for round-robin
+
     # Schedule
     scheduled_date = Column(DateTime, nullable=False)  # Date/time when task should start (in UTC)
     
     # Status
     status = Column(String(20), default="scheduled")  # scheduled, triggered, completed, failed
-    task_id = Column(Integer, nullable=True)  # Reference to created Task when triggered
+    # SET NULL: keep schedule history visible after the underlying task is purged.
+    task_id = Column(Integer, ForeignKey("tasks.id", ondelete="SET NULL"), nullable=True)
     
     # Timestamps
     created_at = Column(DateTime, default=func.now())
     triggered_at = Column(DateTime, nullable=True)
+
+
+class BillingProfile(Base):
+    """Billing profile for auto-checkout."""
+    __tablename__ = "billing_profiles"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(100), nullable=False)  # Profile name e.g. "Leon", "Mate"
+
+    # Personal info
+    firstname = Column(String(100), nullable=False)
+    lastname = Column(String(100), nullable=False)
+    email = Column(String(200), nullable=False)
+    telephone = Column(String(50), nullable=False)
+    stammnummer = Column(String(100), nullable=False)  # Audi employee number / buyer_field_5
+    department = Column(String(200), default="")  # buyer_field_19900
+
+    # Invoice address (always required for Rechnung)
+    invoice_recipient = Column(String(200), default="")
+    invoice_company = Column(String(200), default="")
+    invoice_tax_id = Column(String(100), default="")
+    invoice_street = Column(String(300), default="")
+    invoice_postcode = Column(String(20), default="")
+    invoice_city = Column(String(100), default="")
+    invoice_country = Column(String(10), default="DE")
+
+    # Card details (encrypted with Fernet)
+    card_number_enc = Column(Text, default="")
+    card_exp_month_enc = Column(Text, default="")
+    card_exp_year_enc = Column(Text, default="")
+    card_cvc_enc = Column(Text, default="")
+    card_last4 = Column(String(4), default="")  # For display
+
+    created_at = Column(DateTime, default=func.now())
+
+
+class PushSubscription(Base):
+    """Web Push subscription — one row per browser/device."""
+    __tablename__ = "push_subscriptions"
+
+    endpoint = Column(Text, primary_key=True)  # globally unique per browser+device
+    p256dh = Column(Text, nullable=False)
+    auth = Column(Text, nullable=False)
+    user_agent = Column(String(300), nullable=True)
+    created_at = Column(DateTime, default=func.now())
+    last_sent_at = Column(DateTime, nullable=True)
+
+
+class ReleaseDetector(Base):
+    """Single-row config + state for the new-release auto-detector.
+
+    Polls the shop listing, diffs product URLs against `known_urls`, and when a
+    new one appears it auto-creates and starts a monitoring Task (reusing the
+    normal ATC/ACO path). Always id=1.
+    """
+    __tablename__ = "release_detector"
+
+    id = Column(Integer, primary_key=True, default=1)
+    active = Column(Boolean, default=False)
+    poll_interval = Column(Float, default=10.0)  # seconds between listing scrapes
+
+    # Which new products to ACT on. Substring match on the product URL (case-insensitive).
+    # "fc-bayern" = all matches; "dortmund" = only Dortmund; "" = every new product.
+    keyword = Column(String(200), default="fc-bayern")
+
+    # Task settings applied to each auto-created task
+    quantity = Column(Integer, default=1)
+    num_threads = Column(Integer, default=1)
+    price_category = Column(Integer, default=0)
+    auto_checkout = Column(Boolean, default=False)
+    billing_profile_id = Column(String(100), nullable=True)
+
+    # State (JSON-encoded lists)
+    known_urls = Column(Text, default="[]")      # seen product URLs (seeded on first activation)
+    events_log = Column(Text, default="[]")       # recent detections [{url, at, task_id}], capped
+    scan_count = Column(Integer, default=0)
+    last_scan_at = Column(DateTime, nullable=True)
+    last_new_found_at = Column(DateTime, nullable=True)
+    error_message = Column(Text, nullable=True)

@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from ..database import get_db
 from ..auth import get_current_user
-from ..models import Task, TaskStatus, TaskLog, CartSession
+from ..models import Task, TaskStatus, TaskLog, CartSession, ScheduledTask
 from ..schemas import TaskCreate, TaskResponse, TaskListResponse, TaskLogResponse
 from ..bot.monitor import task_manager
 
@@ -34,12 +34,19 @@ async def create_task(
     task = Task(
         product_url=task_data.product_url,
         quantity=task_data.quantity,
-        num_threads=task_data.num_threads
+        num_threads=task_data.num_threads,
+        price_category=task_data.price_category,
+        auto_checkout=task_data.auto_checkout,
+        billing_profile_id=task_data.billing_profile_id
     )
     db.add(task)
     db.commit()
     db.refresh(task)
-    
+
+    # SQLite stored billing_profile_id as int (column is String but affinity is
+    # loose); response_model expects str, so coerce before returning.
+    if task.billing_profile_id is not None:
+        task.billing_profile_id = str(task.billing_profile_id)
     return task
 
 
@@ -53,8 +60,20 @@ async def list_tasks(
     """List all tasks."""
     tasks = db.query(Task).order_by(Task.created_at.desc()).offset(skip).limit(limit).all()
     total = db.query(Task).count()
-    
-    # Enrich tasks with cart tokens if available
+
+    # Single query for the latest cart token per task (covers success + waiting)
+    active_statuses = (TaskStatus.SUCCESS.value, TaskStatus.WAITING.value)
+    active_ids = [t.id for t in tasks if t.status in active_statuses]
+    cart_tokens: dict[int, str] = {}
+    if active_ids:
+        for task_id, token in (
+            db.query(CartSession.task_id, CartSession.token)
+            .filter(CartSession.task_id.in_(active_ids))
+            .order_by(CartSession.created_at.desc())
+            .all()
+        ):
+            cart_tokens.setdefault(task_id, token)
+
     task_responses = []
     for task in tasks:
         task_dict = {
@@ -62,6 +81,9 @@ async def list_tasks(
             "product_url": task.product_url,
             "quantity": task.quantity,
             "num_threads": task.num_threads,
+            "price_category": task.price_category or 0,
+            "auto_checkout": getattr(task, 'auto_checkout', False) or False,
+            "billing_profile_id": str(task.billing_profile_id) if task.billing_profile_id else None,
             "status": task.status,
             "scan_count": task.scan_count,
             "tickets_available": task.tickets_available or 0,
@@ -72,17 +94,8 @@ async def list_tasks(
             "started_at": task.started_at,
             "completed_at": task.completed_at,
             "error_message": task.error_message,
-            "cart_token": None
+            "cart_token": cart_tokens.get(task.id),
         }
-        
-        # Get the most recent active cart session for this task
-        if task.status == TaskStatus.SUCCESS.value:
-            cart = db.query(CartSession).filter(
-                CartSession.task_id == task.id
-            ).order_by(CartSession.created_at.desc()).first()
-            if cart:
-                task_dict["cart_token"] = cart.token
-        
         task_responses.append(TaskResponse(**task_dict))
     
     return TaskListResponse(tasks=task_responses, total=total)
@@ -98,6 +111,8 @@ async def get_task(
     task = db.query(Task).filter(Task.id == task_id).first()
     if not task:
         raise HTTPException(404, "Task not found")
+    if task.billing_profile_id is not None:
+        task.billing_profile_id = str(task.billing_profile_id)
     return task
 
 
@@ -145,6 +160,13 @@ async def start_task(
             logger.warning(f"Task {task_id} marked as running in DB but not in active_tasks - resetting status")
             task.status = TaskStatus.PENDING.value
             db.commit()
+
+    # Allow restarting a successful task
+    if task.status == TaskStatus.SUCCESS.value:
+        logger.info(f"Task {task_id} is in SUCCESS state, resetting for restart")
+        task.status = TaskStatus.PENDING.value
+        task.completed_at = None
+        db.commit()
     
     success = await task_manager.start_task(task, db)
     logger.info(f"task_manager.start_task returned: {success}")
@@ -185,12 +207,20 @@ async def delete_task(
     if not task:
         raise HTTPException(404, "Task not found")
     
-    # Stop if running
-    if task.status == TaskStatus.RUNNING.value:
+    # Stop anything with a live worker — a WAITING task still holds a re-cart
+    # timer that would otherwise insert a CartSession for a deleted task later.
+    if task.status in (TaskStatus.RUNNING.value, TaskStatus.WAITING.value) \
+            or task_id in task_manager.active_tasks:
         await task_manager.stop_task(task_id, db)
-    
-    # Delete logs
+
+    # Do the ondelete work in the app: the existing production DB predates the
+    # ForeignKey declarations (create_all never alters tables), so SQLite won't
+    # cascade / SET NULL for us there.
     db.query(TaskLog).filter(TaskLog.task_id == task_id).delete()
+    db.query(CartSession).filter(CartSession.task_id == task_id).update(
+        {CartSession.task_id: None}, synchronize_session=False)
+    db.query(ScheduledTask).filter(ScheduledTask.task_id == task_id).update(
+        {ScheduledTask.task_id: None}, synchronize_session=False)
     
     # Delete task
     db.delete(task)

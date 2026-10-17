@@ -1,5 +1,8 @@
 """
 Task manager for running multiple monitoring tasks.
+Uses a shared AvailabilityWatcher to deduplicate polling — multiple tasks
+watching the same product URL share a single poller instead of each
+hammering the site independently.
 """
 import asyncio
 import logging
@@ -16,94 +19,616 @@ from ..config import get_settings
 from ..database import SessionLocal
 from .core import AudiTicketBot, CookieData
 from .discord import send_discord_notification, send_discord_cart_success
+from .web_push import send_push
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
 
+class TaskSubscriber:
+    """A task subscribed to an AvailabilityWatcher."""
+    def __init__(self, task_id: int, product_url: str, quantity: int, num_threads: int, price_category: int):
+        self.task_id = task_id
+        self.product_url = product_url
+        self.quantity = quantity
+        self.num_threads = num_threads
+        self.price_category = price_category
+        self.previous_data = None
+        self.waiting_until: Optional[datetime] = None
+        self.processing = False
+
+
+class AvailabilityWatcher:
+    """
+    Polls a single (event_id, ticket_id) pair and notifies all subscribed tasks.
+    One poller per unique product, no matter how many tasks watch it.
+    """
+    def __init__(self, event_id: str, ticket_id: str, product_url: str, manager: 'TaskManager'):
+        self.event_id = event_id
+        self.ticket_id = ticket_id
+        self.product_url = product_url
+        self.manager = manager
+        self.subscribers: Dict[int, TaskSubscriber] = {}
+        self._task: Optional[asyncio.Task] = None
+        self._bot: Optional[AudiTicketBot] = None
+        self.scan_count = 0
+        self._last_discord_data = None
+        self._option_cache: Dict[str, str] = {}  # (variation,date,time) -> option_number
+        self._last_broadcast = 0.0
+
+    @property
+    def key(self) -> str:
+        return f"{self.event_id}:{self.ticket_id}"
+
+    def add_subscriber(self, sub: TaskSubscriber):
+        self.subscribers[sub.task_id] = sub
+        logger.info(f"[Watcher {self.key}] Task {sub.task_id} subscribed ({len(self.subscribers)} total)")
+
+    def remove_subscriber(self, task_id: int):
+        self.subscribers.pop(task_id, None)
+        logger.info(f"[Watcher {self.key}] Task {task_id} unsubscribed ({len(self.subscribers)} remaining)")
+
+    async def start(self):
+        if self._task is None:
+            self._task = asyncio.create_task(self._poll_loop())
+
+    async def stop(self):
+        if self._task:
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+            self._task = None
+        if self._bot:
+            await self._bot.close_session()
+            self._bot = None
+
+    async def _poll_loop(self):
+        """Single polling loop shared by all subscribers."""
+        db = SessionLocal()
+        _prev_total = -1
+        _consecutive_errors = 0
+        _MAX_ERRORS = 5
+
+        try:
+            self._bot = AudiTicketBot()
+            await self._bot.start_session()
+
+            while self.subscribers:
+                try:
+                    data = await self._bot.get_available_tickets(self.event_id, self.ticket_id)
+                    self.scan_count += 1
+                    _consecutive_errors = 0
+
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    _consecutive_errors += 1
+                    backoff = min(5 * _consecutive_errors, 60)
+                    logger.warning(
+                        f"[Watcher {self.key}] Scan error #{_consecutive_errors}/{_MAX_ERRORS}: {e} "
+                        f"— retrying in {backoff}s"
+                    )
+                    if _consecutive_errors >= _MAX_ERRORS:
+                        raise
+                    await asyncio.sleep(backoff)
+                    continue
+
+                # Calculate total available
+                total_available = 0
+                if data:
+                    try:
+                        total_available = sum(
+                            sum(max(0, t.get('qty_available', 0)) for t in tickets)
+                            for tickets in data.values()
+                        )
+                    except Exception:
+                        total_available = 0
+
+                # Only update DB when scan count is periodic or availability changed
+                now = datetime.utcnow()
+                sub_ids = [sub.task_id for sub in self.subscribers.values()]
+                availability_changed = total_available != _prev_total
+                _prev_was = _prev_total
+                _prev_total = total_available
+
+                if sub_ids and (availability_changed or self.scan_count % 10 == 0):
+                    # synchronize_session=False: the watcher session never reads
+                    # these Task rows after the update, so we don't need fetch's
+                    # extra SELECT round-trip on a 1-second hot path.
+                    db.query(Task).filter(Task.id.in_(sub_ids)).update({
+                        Task.scan_count: self.scan_count,
+                        Task.tickets_available: total_available,
+                        Task.last_scan_at: now,
+                    }, synchronize_session=False)
+                    db.commit()
+
+                # Broadcast scan update once with all task IDs. Every change goes out
+                # immediately; unchanged scans are capped at 2/s so a 0.1s interval
+                # doesn't push 10 messages per second per task into every browser.
+                if availability_changed or (time.monotonic() - self._last_broadcast) >= 0.5:
+                    self._last_broadcast = time.monotonic()
+                    now_iso = now.isoformat()
+                    for task_id in sub_ids:
+                        await self.manager.broadcast({
+                            "type": "scan_update",
+                            "data": {
+                                "task_id": task_id,
+                                "scan_count": self.scan_count,
+                                "tickets_available": total_available,
+                                "last_scan_at": now_iso
+                            }
+                        })
+
+                # Log periodically (always, regardless of availability)
+                if self.scan_count == 1 or self.scan_count % 50 == 0:
+                    msg = (f"Scan #{self.scan_count}: {total_available} tickets available"
+                           if total_available > 0
+                           else f"Scan #{self.scan_count}: No tickets available - waiting for release...")
+                    msg += f" (shared watcher, {len(self.subscribers)} tasks)"
+                    for sub in list(self.subscribers.values()):
+                        await self.manager._log(sub.task_id, "info", msg, db)
+
+                # Process availability for each subscriber
+                if data and total_available > 0:
+                    if data != self._last_discord_data:
+                        self._last_discord_data = data
+                        asyncio.create_task(
+                            send_discord_notification(data, self.product_url)
+                        )
+
+                    for sub in list(self.subscribers.values()):
+                        if sub.waiting_until and datetime.utcnow() < sub.waiting_until:
+                            continue
+                        if sub.processing:
+                            continue
+                        if data == sub.previous_data:
+                            continue
+
+                        sub.previous_data = data
+                        sub.processing = True
+                        asyncio.create_task(
+                            self._handle_availability(sub, data, _prev_was)
+                        )
+
+                if data is None or (data and len(data) == 0):
+                    await asyncio.sleep(5)
+
+                await asyncio.sleep(settings.default_scan_interval)
+
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            import traceback
+            logger.error(f"[Watcher {self.key}] Fatal error after {_consecutive_errors} retries: {e}")
+            logger.error(traceback.format_exc())
+            # Open a fresh session — the loop's `db` may be in a poisoned
+            # transaction state, in which case _mark_failed silently no-ops
+            # and the row stays in 'running' forever.
+            err_db = SessionLocal()
+            try:
+                for sub in list(self.subscribers.values()):
+                    try:
+                        await self.manager._mark_failed(sub.task_id, str(e), err_db)
+                    except Exception as inner:
+                        logger.error(f"[Watcher {self.key}] _mark_failed for task {sub.task_id} failed: {inner}")
+            finally:
+                err_db.close()
+        finally:
+            if self._bot:
+                await self._bot.close_session()
+                self._bot = None
+            db.close()
+            self.manager._remove_watcher(self.key)
+
+    async def _handle_availability(self, sub: TaskSubscriber, data: dict, prev_total: int = -1):
+        """Handle ticket availability for a single subscriber task."""
+        db = SessionLocal()
+        try:
+            process_start_time = time.time()
+
+            # Build per-slot breakdown for visibility into what changed
+            breakdown = []
+            for date, tickets in data.items():
+                for t in tickets:
+                    vars_ = t.get('variations', [])
+                    breakdown.append(f"{date} @{t['time'][:5]}: {t['qty_available']} avail, vars={vars_}")
+            breakdown_str = " | ".join(breakdown) if breakdown else "no slots"
+
+            prev_str = str(prev_total) if prev_total >= 0 else "?"
+            await self.manager._log(sub.task_id, "info",
+                f"Change detected at scan #{self.scan_count}: {prev_str} → {sum(t.get('qty_available',0) for tix in data.values() for t in tix)} available | {breakdown_str} (cat {sub.price_category})", db)
+
+            for date, tickets in data.items():
+                for ticket in tickets:
+                    qty_available = ticket['qty_available']
+                    if qty_available < sub.quantity:
+                        continue
+
+                    await self.manager._log(sub.task_id, "info",
+                        f"Attempting {sub.quantity} ticket(s) for {date} @ {ticket['time']} ({qty_available} available)", db)
+
+                    time_encoded = quote(ticket['time'], safe='')
+                    # Send ticket_time exactly as the availability endpoint returned it.
+                    # Truncating to HH:MM is accepted for plain slots ("10:30:00") but the
+                    # shop rejects it for range slots ("10:00:00-16:00:00") with
+                    # "Die gewünschte Menge ist nicht verfügbar." Both verified live.
+                    time_short = ticket['time']
+                    variations = ticket.get('variations', [])
+                    if not variations:
+                        continue
+
+                    await self.manager._log(sub.task_id, "info",
+                        f"Available variations: {variations} (selecting index {sub.price_category})", db)
+
+                    # Use only the user's chosen variation — no fallbacks.
+                    # If the chosen index isn't in the returned list, skip
+                    # rather than silently carting a different category.
+                    if sub.price_category >= len(variations):
+                        await self.manager._log(sub.task_id, "warning",
+                            f"Chosen price category index {sub.price_category} not in available "
+                            f"variations ({len(variations)} returned) — skipping ATC, will retry on next scan", db)
+                        sub.previous_data = None
+                        return
+                    variation = variations[sub.price_category]
+
+                    cache_key = f"{variation}:{date}:{time_encoded}"
+                    option_number = self._option_cache.get(cache_key)
+                    if not option_number:
+                        option_number = await self._bot.get_option_number(
+                            self.event_id, variation, date, time_encoded
+                        )
+                        if option_number:
+                            self._option_cache[cache_key] = option_number
+
+                    if not option_number:
+                        await self.manager._log(sub.task_id, "warning",
+                            f"Could not resolve option number for variation {variation} — skipping", db)
+                        sub.previous_data = None
+                        return
+
+                    max_possible_carts = qty_available // sub.quantity
+                    actual_threads = min(sub.num_threads, max(1, max_possible_carts))
+
+                    await self.manager._log(sub.task_id, "info",
+                        f"Running {actual_threads} ATC thread(s) for variation {variation}", db)
+
+                    atc_tasks = [
+                        self.manager._attempt_atc(
+                            sub.task_id, self._bot, self.event_id, date,
+                            time_short, variation, option_number,
+                            sub.quantity, sub.product_url, sub.price_category,
+                            process_start_time, db
+                        )
+                        for _ in range(actual_threads)
+                    ]
+
+                    results = await asyncio.gather(*atc_tasks, return_exceptions=True)
+
+                    if any(r is True for r in results if not isinstance(r, Exception)):
+                        await self._handle_cart_success(sub, db)
+                        return
+
+                    # Chosen variation failed — will retry on next scan
+                    await self.manager._log(sub.task_id, "warning",
+                        f"ATC failed for variation {variation} — will retry on next scan", db)
+                    sub.previous_data = None
+                    return
+        finally:
+            sub.processing = False
+            db.close()
+
+    async def _handle_cart_success(self, sub: TaskSubscriber, db: Session):
+        """Handle successful cart — check for ACO, then wait for re-cart."""
+        task = db.query(Task).filter(Task.id == sub.task_id).first()
+        auto_checkout = getattr(task, 'auto_checkout', False) if task else False
+        billing_profile_id = getattr(task, 'billing_profile_id', None) if task else None
+
+        aco_completed = 0
+        if auto_checkout and billing_profile_id:
+            aco_completed = await self._run_auto_checkout(sub, task, db)
+        else:
+            # Normal flow: just notify and wait for manual checkout
+            await self.manager._log(sub.task_id, "success",
+                "Successfully carted! Sleeping 17 min then will re-cart...", db)
+
+        if task:
+            task.status = TaskStatus.SUCCESS.value
+            task.completed_at = datetime.utcnow()
+            db.commit()
+
+        await self.manager.broadcast({
+            "type": "task_update",
+            "data": {"task_id": sub.task_id, "status": "success"}
+        })
+
+        # ACO placed at least one order — user has their tickets. Stop monitoring
+        # for this task so we don't cart again (and risk a duplicate order)
+        # during the would-be re-cart window.
+        if aco_completed > 0:
+            await self.manager._log(sub.task_id, "success",
+                f"{aco_completed} order(s) placed — stopping monitor.", db)
+            self.manager.detach_subscriber(sub.task_id)
+            return
+
+        await asyncio.sleep(3)
+
+        cart_hold = settings.cart_hold_time
+        task = db.query(Task).filter(Task.id == sub.task_id).first()
+        if task:
+            task.status = TaskStatus.WAITING.value
+            db.commit()
+
+        await self.manager.broadcast({
+            "type": "task_update",
+            "data": {
+                "task_id": sub.task_id,
+                "status": "waiting",
+                "recart_at": (datetime.utcnow() + timedelta(seconds=cart_hold - 3)).isoformat()
+            }
+        })
+
+        await self.manager._log(sub.task_id, "info",
+            f"Waiting {cart_hold // 60} min before re-cart...", db)
+
+        sub.waiting_until = datetime.utcnow() + timedelta(seconds=cart_hold - 3)
+        sub.previous_data = None
+
+        asyncio.create_task(self._reactivate_after_wait(sub, cart_hold - 3))
+
+    async def _run_auto_checkout(self, sub: TaskSubscriber, task: Task, db: Session) -> int:
+        """Auto-checkout via the global AcoDispatcher.
+
+        Hands each pending cart for this task off to the dispatcher one at a
+        time. The dispatcher owns profile selection (next unused profile for
+        the event) and serializes checkouts globally, so six tasks sharing a
+        three-profile pool yield at most three orders with distinct profiles.
+        """
+        from .aco_dispatcher import AcoDispatcher  # local import, avoids cycle
+
+        profile_id_str = str(task.billing_profile_id or "")
+        profile_ids = [int(x.strip()) for x in profile_id_str.split(",") if x.strip().isdigit()]
+        if not profile_ids:
+            await self.manager._log(sub.task_id, "error", "ACO: No billing profile IDs configured", db)
+            return 0
+
+        now = datetime.utcnow()
+        carts = db.query(CartSession).filter(
+            CartSession.task_id == sub.task_id,
+            CartSession.checkout_status == "pending",
+            CartSession.expires_at > now
+        ).order_by(CartSession.created_at.desc()).all()
+        if not carts:
+            await self.manager._log(sub.task_id, "error", "ACO: No pending cart sessions found", db)
+            return 0
+
+        await self.manager._log(
+            sub.task_id, "info",
+            f"ACO: Dispatching {len(carts)} cart(s); pool={profile_ids}", db,
+        )
+
+        completed = 0
+        dispatcher = AcoDispatcher.get()
+        for i, cart in enumerate(carts):
+            if i > 0:
+                await asyncio.sleep(15)
+            ok, msg = await dispatcher.run_checkout(cart.id, profile_ids)
+            if ok:
+                completed += 1
+            else:
+                await self.manager._log(sub.task_id, "info", f"ACO: Cart {cart.id} — {msg}", db)
+                if msg == "Profile pool exhausted":
+                    break
+        return completed
+
+    async def _reactivate_after_wait(self, sub: TaskSubscriber, wait_seconds: int):
+        """Reactivate a subscriber after cart hold wait."""
+        await asyncio.sleep(wait_seconds)
+
+        # Identity check — if the user stopped/restarted the task during the
+        # wait, the current subscriber is a different object than the one we
+        # scheduled this timer for. Don't touch the new one.
+        if self.subscribers.get(sub.task_id) is not sub:
+            return
+
+        sub.waiting_until = None
+        sub.previous_data = None
+        sub.processing = False
+
+        db = SessionLocal()
+        try:
+            task = db.query(Task).filter(Task.id == sub.task_id).first()
+            if task:
+                task.status = TaskStatus.RUNNING.value
+                task.completed_at = None
+                db.commit()
+
+            await self.manager.broadcast({
+                "type": "task_update",
+                "data": {"task_id": sub.task_id, "status": "running"}
+            })
+
+            await self.manager._log(sub.task_id, "info",
+                "Cart hold expired, resuming monitoring for re-cart...", db)
+        finally:
+            db.close()
+
+
 class TaskManager:
     """
     Manages multiple monitoring tasks.
-    Each task runs in its own async coroutine.
+    Tasks sharing the same product URL share a single AvailabilityWatcher.
     """
-    
+
     def __init__(self):
         self.active_tasks: Dict[int, asyncio.Task] = {}
-        self.task_data: Dict[int, dict] = {}  # Store previous data per task
+        self.task_data: Dict[int, dict] = {}
         self._ws_broadcast: Optional[Callable] = None
-    
+        self._watchers: Dict[str, AvailabilityWatcher] = {}  # key -> watcher
+        self._task_watcher_map: Dict[int, str] = {}  # task_id -> watcher key
+
     def set_ws_broadcast(self, callback: Callable):
-        """Set WebSocket broadcast callback."""
         self._ws_broadcast = callback
-    
+
     async def broadcast(self, message: dict):
-        """Broadcast message to WebSocket clients."""
         if self._ws_broadcast:
             await self._ws_broadcast(message)
-    
+
+    def _remove_watcher(self, key: str):
+        """Remove a watcher (called when its poll loop exits)."""
+        self._watchers.pop(key, None)
+        # Clean up task mappings
+        to_remove = [tid for tid, k in self._task_watcher_map.items() if k == key]
+        for tid in to_remove:
+            self._task_watcher_map.pop(tid, None)
+            self.active_tasks.pop(tid, None)
+            self.task_data.pop(tid, None)
+
+    def detach_subscriber(self, task_id: int):
+        """Unsubscribe a task and release its in-memory state, without marking
+        STOPPED. Called when a task finishes on its own (e.g. ACO placed an
+        order) so the SUCCESS status in the DB survives."""
+        watcher_key = self._task_watcher_map.pop(task_id, None)
+        if watcher_key:
+            watcher = self._watchers.get(watcher_key)
+            if watcher:
+                watcher.remove_subscriber(task_id)
+        self.active_tasks.pop(task_id, None)
+        self.task_data.pop(task_id, None)
+
     async def start_task(self, task: Task, db: Session) -> bool:
         """Start a monitoring task."""
         logger.info(f"TaskManager.start_task called for task {task.id}")
-        
+
         if task.id in self.active_tasks:
             logger.warning(f"Task {task.id} already in active_tasks, returning False")
             return False
-        
+
         # Update task status
         task.status = TaskStatus.RUNNING.value
         task.started_at = datetime.utcnow()
         db.commit()
-        logger.info(f"Task {task.id} status updated to RUNNING in DB")
-        
-        # Create and store the async task - don't pass db, it will create its own
+
+        price_category = task.price_category or 0
+
+        # Extract event details to find or create a watcher
         async_task = asyncio.create_task(
-            self._run_monitor(task.id, task.product_url, task.quantity, task.num_threads)
+            self._setup_task(task.id, task.product_url, task.quantity, task.num_threads, price_category)
         )
         self.active_tasks[task.id] = async_task
         self.task_data[task.id] = {"previous_data": None}
-        logger.info(f"Task {task.id} async task created and stored")
-        
+
         await self.broadcast({
             "type": "task_update",
             "data": {"task_id": task.id, "status": "running"}
         })
-        
+
         return True
-    
+
+    async def _setup_task(self, task_id: int, product_url: str, quantity: int, num_threads: int, price_category: int):
+        """Extract event IDs and subscribe to a shared watcher."""
+        db = SessionLocal()
+        watcher = None
+        try:
+            async with AudiTicketBot() as bot:
+                await self._log(task_id, "info", f"Started monitoring: {product_url}", db)
+
+                event_id, ticket_id, categories = await bot.extract_event_details(product_url)
+
+                if not event_id or not ticket_id:
+                    await self._log(task_id, "error", "Could not extract Event/Ticket ID", db)
+                    await self._mark_failed(task_id, "Could not extract Event/Ticket ID", db)
+                    return
+
+                task = db.query(Task).filter(Task.id == task_id).first()
+                if task:
+                    task.event_id = event_id
+                    task.ticket_id = ticket_id
+                    db.commit()
+
+                await self._log(task_id, "info", f"Event ID: {event_id}, Ticket ID: {ticket_id}", db)
+                if categories:
+                    await self._log(task_id, "info", f"Price categories from page: {categories}", db)
+                    await self._log(task_id, "info",
+                        f"Selected category index {price_category}: {categories[price_category] if price_category < len(categories) else 'unknown'}", db)
+
+            # Find or create watcher
+            watcher_key = f"{event_id}:{ticket_id}"
+            if watcher_key in self._watchers:
+                watcher = self._watchers[watcher_key]
+                await self._log(task_id, "info",
+                    f"Joining shared watcher (already monitoring with {len(watcher.subscribers)} other task(s))", db)
+            else:
+                watcher = AvailabilityWatcher(event_id, ticket_id, product_url, self)
+                self._watchers[watcher_key] = watcher
+                await self._log(task_id, "info", "Created new availability watcher", db)
+
+            # Subscribe and start watcher
+            sub = TaskSubscriber(task_id, product_url, quantity, num_threads, price_category)
+            watcher.add_subscriber(sub)
+            self._task_watcher_map[task_id] = watcher_key
+            await watcher.start()
+
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            import traceback
+            logger.error(f"Task {task_id} setup error: {e}")
+            logger.error(traceback.format_exc())
+            await self._mark_failed(task_id, str(e), db)
+            return
+        finally:
+            db.close()  # release connection — keep-alive loop needs no DB
+
+        # Keep this coroutine alive while the task is subscribed
+        # (so active_tasks[task_id] stays valid). No DB session held here.
+        try:
+            while task_id in watcher.subscribers:
+                await asyncio.sleep(1)
+        except asyncio.CancelledError:
+            watcher.remove_subscriber(task_id)
+            if not watcher.subscribers:
+                await watcher.stop()
+            raise
+
     async def stop_task(self, task_id: int, db: Session) -> bool:
         """Stop a running task."""
         was_active = task_id in self.active_tasks
-        
+
+        # Unsubscribe from watcher
+        watcher_key = self._task_watcher_map.pop(task_id, None)
+        if watcher_key and watcher_key in self._watchers:
+            watcher = self._watchers[watcher_key]
+            watcher.remove_subscriber(task_id)
+            if not watcher.subscribers:
+                await watcher.stop()
+                self._watchers.pop(watcher_key, None)
+
         if was_active:
-            # Cancel the async task
             self.active_tasks[task_id].cancel()
-            
             try:
                 await self.active_tasks[task_id]
             except asyncio.CancelledError:
                 pass
-            
             del self.active_tasks[task_id]
             if task_id in self.task_data:
                 del self.task_data[task_id]
-        
-        # Update DB regardless (in case of stale state)
+
         task = db.query(Task).filter(Task.id == task_id).first()
-        if task and task.status == TaskStatus.RUNNING.value:
+        if task and task.status in (TaskStatus.RUNNING.value, TaskStatus.SUCCESS.value, TaskStatus.WAITING.value, TaskStatus.PENDING.value):
             task.status = TaskStatus.STOPPED.value
             task.completed_at = datetime.utcnow()
             db.commit()
-            
+
             await self.broadcast({
                 "type": "task_update",
                 "data": {"task_id": task_id, "status": "stopped"}
             })
             return True
-        
+
         return was_active
-        
-        return True
-    
+
     async def _log(self, task_id: int, level: str, message: str, db: Session):
         """Add log entry for task."""
         try:
@@ -114,7 +639,7 @@ class TaskManager:
         except Exception as e:
             logger.error(f"[Task {task_id}] DB log error: {e}")
             db.rollback()
-        
+
         try:
             await self.broadcast({
                 "type": "log",
@@ -127,295 +652,66 @@ class TaskManager:
             })
         except Exception as e:
             logger.error(f"[Task {task_id}] Broadcast error: {e}")
-    
-    async def _run_monitor(
-        self,
-        task_id: int,
-        product_url: str,
-        quantity: int,
-        num_threads: int
-    ):
-        """Main monitoring loop for a task."""
-        logger.info(f"[Task {task_id}] _run_monitor started for {product_url}")
-        
-        # Create own database session for this long-running task
-        db = SessionLocal()
-        
-        try:
-            logger.info(f"[Task {task_id}] Creating bot instance...")
-            async with AudiTicketBot() as bot:
-                logger.info(f"[Task {task_id}] Bot created, logging start message...")
-                await self._log(task_id, "info", f"Started monitoring: {product_url}", db)
-                
-                # Extract event details
-                event_id, ticket_id = await bot.extract_event_details(product_url)
-                
-                if not event_id or not ticket_id:
-                    await self._log(task_id, "error", "Could not extract Event/Ticket ID", db)
-                    await self._mark_failed(task_id, "Could not extract Event/Ticket ID", db)
-                    return
-                
-                # Store IDs in task
-                task = db.query(Task).filter(Task.id == task_id).first()
-                if task:
-                    task.event_id = event_id
-                    task.ticket_id = ticket_id
-                    db.commit()
-                
-                await self._log(task_id, "info", f"Event ID: {event_id}, Ticket ID: {ticket_id}", db)
-                
-                scan_count = 0
-                previous_data = None
-                no_tickets_logged = False
-                
-                while True:
-                    data = await bot.get_available_tickets(event_id, ticket_id)
-                    scan_count += 1
-                    
-                    # Calculate total available tickets (only count positive values!)
-                    total_available = 0
-                    if data:
-                        try:
-                            total_available = sum(
-                                sum(max(0, t.get('qty_available', 0)) for t in tickets)
-                                for tickets in data.values()
-                            )
-                        except Exception:
-                            total_available = 0
-                    
-                    # Update DB with scan info on every scan (for real-time status)
-                    task = db.query(Task).filter(Task.id == task_id).first()
-                    if task:
-                        task.scan_count = scan_count
-                        task.tickets_available = total_available
-                        task.last_scan_at = datetime.utcnow()
-                        db.commit()
-                    
-                    # Broadcast scan update to WebSocket clients
-                    await self.broadcast({
-                        "type": "scan_update",
-                        "data": {
-                            "task_id": task_id,
-                            "scan_count": scan_count,
-                            "tickets_available": total_available,
-                            "last_scan_at": datetime.utcnow().isoformat()
-                        }
-                    })
-                    
-                    # Log status periodically or on first scan
-                    if scan_count == 1 or scan_count % 50 == 0:
-                        if total_available > 0:
-                            await self._log(task_id, "info", f"Scan #{scan_count}: {total_available} tickets available", db)
-                            no_tickets_logged = False
-                        else:
-                            if not no_tickets_logged or scan_count == 1:
-                                await self._log(task_id, "info", f"Scan #{scan_count}: No tickets available - waiting for release...", db)
-                                no_tickets_logged = True
-                    
-                    # Only process if there are actually available tickets
-                    if data and total_available > 0 and data != previous_data:
-                        process_start_time = time.time()
-                        previous_data = data
-                        no_tickets_logged = False
-                        
-                        await self._log(task_id, "info", f"Change detected! {total_available} tickets available - processing...", db)
-                        
-                        # Send Discord notification (async, non-blocking)
-                        asyncio.create_task(
-                            send_discord_notification(data, product_url)
-                        )
-                        
-                        # Try to buy tickets
-                        for date, tickets in data.items():
-                            for ticket in tickets:
-                                qty_available = ticket['qty_available']
-                                if qty_available >= quantity:  # Only try if enough tickets available
-                                    await self._log(
-                                        task_id, "info",
-                                        f"Attempting to buy {quantity} ticket(s) for {date} @ {ticket['time']} ({qty_available} available)", db
-                                    )
-                                    
-                                    time_encoded = quote(ticket['time'], safe='')
-                                    time_short = ticket['time'][:5]
-                                    variation = ticket['variations'][0] if ticket['variations'] else None
-                                    
-                                    if not variation:
-                                        continue
-                                    
-                                    option_number = await bot.get_option_number(
-                                        event_id, variation, date, time_encoded
-                                    )
-                                    
-                                    if option_number:
-                                        # Limit concurrent attempts to available tickets divided by quantity
-                                        # This prevents creating more carts than can actually be filled
-                                        max_possible_carts = qty_available // quantity
-                                        actual_threads = min(num_threads, max(1, max_possible_carts))
-                                        
-                                        await self._log(
-                                            task_id, "info",
-                                            f"Running {actual_threads} ATC thread(s) (limited by {max_possible_carts} possible carts)", db
-                                        )
-                                        
-                                        # Run ATC attempts concurrently
-                                        tasks = []
-                                        for _ in range(actual_threads):
-                                            tasks.append(
-                                                self._attempt_atc(
-                                                    task_id, bot, event_id, date,
-                                                    time_short, variation, option_number,
-                                                    quantity, product_url, process_start_time, db
-                                                )
-                                            )
-                                        
-                                        results = await asyncio.gather(*tasks, return_exceptions=True)
-                                        
-                                        # Check if any succeeded
-                                        if any(r is True for r in results if not isinstance(r, Exception)):
-                                            await self._log(
-                                                task_id, "success",
-                                                "Successfully carted! Sleeping 17 min then will re-cart...", db
-                                            )
-                                            
-                                            # Update task status to success
-                                            task = db.query(Task).filter(Task.id == task_id).first()
-                                            if task:
-                                                task.status = TaskStatus.SUCCESS.value
-                                                task.completed_at = datetime.utcnow()
-                                                db.commit()
-                                            
-                                            # Broadcast task update
-                                            await self.broadcast({
-                                                "type": "task_update",
-                                                "data": {"task_id": task_id, "status": "success"}
-                                            })
-                                            
-                                            # Sleep to hold cart (17 minutes)
-                                            await asyncio.sleep(settings.cart_hold_time)
-                                            
-                                            # After cart hold time, restart the task to re-cart
-                                            logger.info(f"Task {task_id} cart hold complete, restarting to re-cart...")
-                                            await self._log(
-                                                task_id, "info",
-                                                "Cart hold expired, restarting to re-cart items...", db
-                                            )
-                                            
-                                            # Reset task status to running for re-cart
-                                            task = db.query(Task).filter(Task.id == task_id).first()
-                                            if task:
-                                                task.status = TaskStatus.RUNNING.value
-                                                task.completed_at = None
-                                                db.commit()
-                                            
-                                            await self.broadcast({
-                                                "type": "task_update",
-                                                "data": {"task_id": task_id, "status": "running"}
-                                            })
-                                            
-                                            # Continue the loop to scan again
-                                            scan_count = 0  # Reset scan count for new cycle
-                                            previous_data = None
-                                            no_tickets_logged = False
-                                            continue  # Continue the while True loop
-                                        
-                                        break
-                            else:
-                                continue
-                            break
-                    
-                    elif data is None or (data and len(data) == 0):
-                        # Rate limited, error, or no tickets available
-                        await asyncio.sleep(5)
-                    
-                    # Normal scan interval
-                    await asyncio.sleep(settings.default_scan_interval)
-                    
-        except asyncio.CancelledError:
-            logger.info(f"Task {task_id} cancelled")
-            raise
-        except Exception as e:
-            import traceback
-            logger.error(f"Task {task_id} error: {e}")
-            logger.error(f"Task {task_id} traceback: {traceback.format_exc()}")
-            await self._mark_failed(task_id, str(e), db)
-        finally:
-            # Always clean up from active_tasks when monitor exits
-            if task_id in self.active_tasks:
-                del self.active_tasks[task_id]
-                logger.info(f"Task {task_id} removed from active_tasks")
-            if task_id in self.task_data:
-                del self.task_data[task_id]
-            db.close()
-    
+
     async def _attempt_atc(
-        self,
-        task_id: int,
-        bot: AudiTicketBot,
-        event_id: str,
-        date: str,
-        time_short: str,
-        variation: str,
-        option_number: str,
-        quantity: int,
-        product_url: str,
-        start_time: float,
-        db: Session
+        self, task_id: int, bot: AudiTicketBot, event_id: str, date: str,
+        time_short: str, variation: str, option_number: str, quantity: int,
+        product_url: str, price_category: int, start_time: float, db: Session
     ) -> bool:
-        """Attempt to add to cart (single thread)."""
-        # Create new session for this attempt
-        async with AudiTicketBot() as atc_bot:
+        """Attempt to add to cart (single thread). Creates fresh session for unique cookie."""
+        atc_bot = AudiTicketBot()
+        await atc_bot.start_session()
+        try:
             success, cookie, error = await atc_bot.add_to_cart(
                 event_id, date, time_short, variation,
                 option_number, quantity, product_url
             )
-            
+
             if success and cookie:
                 total_time = time.time() - start_time
-                
-                await self._log(
-                    task_id, "success",
-                    f"Cookie secured: {cookie.name} (Time: {total_time:.2f}s)", db
-                )
-                
-                # Store cart session
+
+                await self._log(task_id, "success",
+                    f"Cookie secured: {cookie.value} (Time: {total_time:.2f}s)", db)
+
                 token = secrets.token_urlsafe(32)
                 cart_session = CartSession(
-                    token=token,
-                    task_id=task_id,
-                    cookie_name=cookie.name,
-                    cookie_value=cookie.value,
-                    cookie_domain=cookie.domain,
-                    product_url=product_url,
-                    checkout_url=f"https://audidefuehrungen2.regiondo.de/checkout/cart",
-                    quantity=quantity,
+                    token=token, task_id=task_id, event_id=event_id,
+                    cookie_name=cookie.name, cookie_value=cookie.value,
+                    cookie_domain=cookie.domain, product_url=product_url,
+                    checkout_url="https://audidefuehrungen2.regiondo.de/checkout/cart",
+                    quantity=quantity, price_category=price_category,
                     total_time=total_time,
                     expires_at=datetime.utcnow() + timedelta(seconds=settings.cart_hold_time)
                 )
                 db.add(cart_session)
                 db.commit()
-                
-                # Broadcast success
+
                 await self.broadcast({
                     "type": "cart_success",
                     "data": {
-                        "task_id": task_id,
-                        "token": token,
-                        "quantity": quantity,
-                        "total_time": total_time
+                        "task_id": task_id, "token": token,
+                        "quantity": quantity, "total_time": total_time
                     }
                 })
-                
-                # Send Discord notification
+
                 await send_discord_cart_success(
-                    product_url, cookie, quantity, total_time, token
+                    product_url, cookie, quantity, total_time, token, price_category
                 )
-                
+                await send_push(
+                    title="Cart secured",
+                    body=f"{quantity}× in {total_time:.1f}s — tap to pick a profile",
+                    url=f"/carts?pick={cart_session.id}",
+                    tag=f"cart-{cart_session.id}",
+                )
+
                 return True
             else:
                 if error:
                     await self._log(task_id, "warning", f"ATC failed: {error}", db)
                 return False
-    
+        finally:
+            await atc_bot.close_session()
+
     async def _mark_failed(self, task_id: int, error: str, db: Session):
         """Mark task as failed."""
         task = db.query(Task).filter(Task.id == task_id).first()
@@ -424,10 +720,10 @@ class TaskManager:
             task.error_message = error
             task.completed_at = datetime.utcnow()
             db.commit()
-        
-        if task_id in self.active_tasks:
-            del self.active_tasks[task_id]
-        
+
+        self.active_tasks.pop(task_id, None)
+        self._task_watcher_map.pop(task_id, None)
+
         await self.broadcast({
             "type": "task_update",
             "data": {"task_id": task_id, "status": "failed", "error": error}

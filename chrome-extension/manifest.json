@@ -1,0 +1,19 @@
+{
+  "manifest_version": 3,
+  "name": "Audi Ticket Checkout",
+  "version": "1.0",
+  "description": "Inject cart session cookies for Audi ticket checkout",
+  "permissions": ["cookies", "storage"],
+  "host_permissions": [
+    "https://audidefuehrungen2.regiondo.de/*",
+    "http://51.20.185.59/*"
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": "icon.png"
+  },
+  "icons": {
+    "48": "icon.png",
+    "128": "icon.png"
+  }
+}

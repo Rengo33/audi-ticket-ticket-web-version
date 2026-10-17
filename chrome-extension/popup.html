@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      width: 360px;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #1c1c1e;
+      color: white;
+      padding: 16px;
+    }
+    h1 { font-size: 16px; margin-bottom: 12px; }
+    .form-group { margin-bottom: 12px; }
+    label { display: block; font-size: 12px; color: #8e8e93; margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.5px; }
+    input {
+      width: 100%;
+      padding: 10px 12px;
+      border: 1px solid #38383a;
+      border-radius: 8px;
+      background: #2c2c2e;
+      color: white;
+      font-size: 14px;
+      font-family: monospace;
+    }
+    input:focus { outline: none; border-color: #007AFF; }
+    .btn {
+      width: 100%;
+      padding: 12px;
+      border: none;
+      border-radius: 10px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      margin-top: 6px;
+    }
+    .btn-green { background: #34c759; color: white; }
+    .btn-blue { background: #007AFF; color: white; }
+    .btn:hover { opacity: 0.9; }
+    .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+    .status {
+      margin-top: 12px;
+      padding: 10px;
+      border-radius: 8px;
+      font-size: 13px;
+      text-align: center;
+      display: none;
+    }
+    .status.success { display: block; background: rgba(52,199,89,0.2); color: #34c759; }
+    .status.error { display: block; background: rgba(255,59,48,0.2); color: #ff3b30; }
+    .divider { border-top: 1px solid #38383a; margin: 14px 0; }
+    .saved-server { font-size: 12px; color: #8e8e93; margin-top: 8px; }
+    .carts-list { margin-top: 8px; max-height: 200px; overflow-y: auto; }
+    .cart-item {
+      background: #2c2c2e;
+      border-radius: 8px;
+      padding: 10px;
+      margin-bottom: 6px;
+      cursor: pointer;
+      border: 1px solid #38383a;
+      transition: border-color 0.2s;
+    }
+    .cart-item:hover { border-color: #007AFF; }
+    .cart-item .cat { font-weight: 600; font-size: 13px; }
+    .cart-item .meta { font-size: 11px; color: #8e8e93; margin-top: 3px; }
+    .cart-item .timer { color: #ffd700; font-weight: 600; float: right; font-size: 13px; }
+  </style>
+</head>
+<body>
+  <h1>Audi Ticket Checkout</h1>
+
+  <div class="form-group">
+    <label>Server URL</label>
+    <input type="text" id="serverUrl" value="http://51.20.185.59">
+  </div>
+  <div id="loginSection">
+    <div class="form-group">
+      <label>Passwort</label>
+      <input type="password" id="password" placeholder="Dashboard Passwort">
+    </div>
+    <button class="btn btn-blue" id="loginBtn">Login & Carts laden</button>
+  </div>
+  <div id="loggedInSection" style="display:none">
+    <button class="btn btn-blue" id="fetchBtn">Carts laden</button>
+    <button class="btn" id="logoutBtn" style="background:#38383a;margin-top:6px;font-size:12px">Logout</button>
+  </div>
+
+  <div class="divider"></div>
+
+  <div id="cartsSection" style="display:none">
+    <label>Active Carts — click to checkout</label>
+    <div class="carts-list" id="cartsList"></div>
+  </div>
+
+  <div class="form-group" id="manualSection">
+    <label>Oder manuell: Token einfugen</label>
+    <input type="text" id="tokenInput" placeholder="Cart token">
+    <button class="btn btn-green" id="checkoutBtn" style="margin-top:8px">Checkout</button>
+  </div>
+
+  <div class="status" id="status"></div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

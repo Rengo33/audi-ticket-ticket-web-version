@@ -8,7 +8,6 @@ Audi Ticket Bot - A ticket monitoring and auto-carting system for Audi factory t
 
 **Components:**
 - `audi-ticket-web/` - Web application (FastAPI backend + Vue 3 frontend)
-- `Audi_Ticket_Bot_App/AudiTicketBot/` - Native iOS app (SwiftUI)
 
 ## Development Commands
 
@@ -36,13 +35,6 @@ cd audi-ticket-web
 docker-compose up -d --build
 docker-compose logs -f
 ```
-
-### iOS App (SwiftUI)
-Open in Xcode:
-```bash
-open Audi_Ticket_Bot_App/AudiTicketBot/AudiTicketBot.xcodeproj
-```
-Build and run on simulator or device. Requires iOS 16+.
 
 ## Architecture
 
@@ -72,22 +64,6 @@ Build and run on simulator or device. Requires iOS 16+.
   - `api.js` - API client
 - **Views**: `src/views/` - Dashboard, Tasks, Carts, Games, Login
 - **Styling**: TailwindCSS
-
-### iOS App (`Audi_Ticket_Bot_App/AudiTicketBot/`)
-- **SwiftUI app** targeting iOS 16+
-- **Entry point**: `AudiTicketBotApp.swift` with `ContentView.swift` as root view
-- **Views** (TabView-based navigation):
-  - `GamesView` - Browse and schedule games
-  - `TasksView` - View/manage monitoring tasks
-  - `CartsView` - View successful carts with checkout links
-  - `SettingsView` - App configuration and logout
-  - `CreateTaskView`, `TaskDetailView`, `SafariView`, `LoginView`
-- **Services** (singletons):
-  - `APIService` - HTTP client for backend API, uses `X-Auth-Token` header
-  - `AuthManager` - Authentication state with Keychain storage
-  - `TaskMonitor` - Polls backend for task/cart updates
-  - `KeychainHelper` - Secure token storage
-- **Models**: `Task.swift`, `Cart.swift`, `Game.swift`
 
 ### Key Data Flow
 1. User creates a monitoring task with a product URL and desired quantity

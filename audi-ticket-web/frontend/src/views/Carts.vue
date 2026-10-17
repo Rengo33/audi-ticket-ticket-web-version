@@ -1,232 +1,561 @@
 <template>
-  <div class="carts-view">
-    <!-- Header/Title handled by parent or just internal title -->
-    
-    <div v-if="cartStore.loading && cartStore.carts.length === 0" class="loading-state">
-        Loading carts...
+  <div>
+    <div class="view-head">
+      <div>
+        <div class="eyebrow">ACTIVE RESERVATIONS</div>
+        <h1 class="view-title">Carts</h1>
+      </div>
+      <div class="ws-chip mono">
+        <span class="live-dot"></span>
+        {{ cartStore.validCarts.length }} live
+      </div>
     </div>
 
-    <div v-else-if="cartStore.validCarts.length === 0" class="empty-state">
-      <div class="empty-icon">🛒</div>
-      <h3>No Active Carts</h3>
+    <div v-if="cartStore.loading && cartStore.carts.length === 0" class="empty">
+      <div class="empty-mark is-loading"><div class="spinner"></div></div>
+      <h3>Loading carts…</h3>
+    </div>
+
+    <div v-else-if="cartStore.validCarts.length === 0" class="empty">
+      <div class="empty-mark">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M2 4h3l2.5 12h12"/><path d="M7.5 16h12L22 7H6"/><circle cx="9" cy="20" r="1.5"/><circle cx="18" cy="20" r="1.5"/></svg>
+      </div>
+      <h3>No active carts</h3>
       <p>Carts expire after 17 minutes. Start a task to grab tickets.</p>
     </div>
 
     <div v-else class="carts-grid">
-      <div v-for="cart in cartStore.validCarts" :key="cart.token" class="cart-card">
-        <div class="card-header-blue">
-            <div class="timer-badge">
-              <span class="icon">⏰</span>
-              <span class="time">{{ formatTime(new Date(cart.expires_at)) }}</span>
-            </div>
+      <article v-for="cart in cartStore.validCarts" :key="cart.token" class="cart-card" :class="{ 'is-critical': getRemaining(cart) < 180 && cart.checkout_status === 'pending' }">
+        <div class="cart-top">
+          <div class="cart-timer">
+            <span class="cart-timer-label mono">Expires in</span>
+            <span class="cart-timer-value mono tnum">{{ formatTime(cart.expires_at) }}</span>
+          </div>
+          <span class="badge" :class="statusBadgeClass(cart)">
+            <span class="live-dot" v-if="isLiveStatus(cart)"></span>
+            {{ statusLabel(cart) }}
+          </span>
         </div>
 
-        <div class="card-content">
-            <div class="blue-icon-circle">🛒</div>
-            <div class="details">
-                <!-- Fallback if product_url is missing, use checkout_url or generic -->
-                <h3>{{ getDisplayName(cart.product_url || cart.checkout_url) }}</h3>
-                <p class="meta">Qty: {{ cart.quantity }} • Thread #{{ cart.thread_id || '?' }}</p>
-            </div>
+        <div class="progress-track">
+          <div class="progress-fill" :style="{ width: getProgress(cart.expires_at) + '%' }"></div>
         </div>
 
-        <div class="progress-bar-bg">
-            <div class="progress-bar-fill" :style="{ width: getProgress(new Date(cart.expires_at)) + '%' }"></div>
+        <div class="cart-body">
+          <h3 class="cart-title">
+            <span v-if="cart.auto_checkout" class="aco-tag mono">[ACO]</span>
+            {{ getDisplayName(cart.product_url || cart.checkout_url) }}
+          </h3>
+          <div class="cart-meta mono">
+            <span>{{ cart.quantity }}× tix</span>
+            <span class="dot-sep">·</span>
+            <span>{{ priceCategoryLabel(cart.price_category) }}</span>
+            <span v-if="cart.total_time" class="dot-sep">·</span>
+            <span v-if="cart.total_time">{{ cart.total_time.toFixed(2) }}s</span>
+          </div>
+          <div v-if="cart.billing_profile_name && cart.checkout_status === 'completed'" class="cart-profile mono">
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
+            {{ cart.billing_profile_name }}
+          </div>
+          <div v-if="cart.checkout_error" class="cart-error mono">{{ cart.checkout_error }}</div>
         </div>
 
-        <div class="card-actions">
-            <!-- Ensure checkout_url is formed correctly if just a token or full URL -->
-            <a :href="getCheckoutUrl(cart)" target="_blank" class="checkout-btn">
-                Proceed to Checkout
+        <div class="cart-actions">
+          <button @click="copyCookie(cart)" class="btn btn-ghost">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M21 10c-.5-3-2.7-5.3-5.5-6A9 9 0 1 0 21 14c0-.5 0-1 0-1.5-.5.5-1.5 1-2.5 1s-2-1-2-2c0-.8-.5-1.5-1.5-1.5S12 9.5 12 10.5c0 .8-.5 1.5-1.5 1.5S9 11.3 9 10.5"/></svg>
+            <span>Cookie</span>
+          </button>
+          <template v-if="cart.checkout_status === 'pending' || cart.checkout_status === 'failed'">
+            <button @click="openCheckoutModal(cart)" class="btn btn-primary cart-cta">
+              {{ cart.checkout_status === 'failed' ? 'Retry' : 'Checkout' }}
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
+            </button>
+            <a :href="getCheckoutUrl(cart)" target="_blank" rel="noopener" class="btn btn-ghost cart-cta">
+              Manual
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M7 17L17 7M7 7h10v10"/></svg>
             </a>
+          </template>
+          <a v-else-if="cart.checkout_status === 'completed' && cart.invoice_url" :href="cart.invoice_url" target="_blank" rel="noopener" class="btn btn-primary cart-cta">
+            Invoice
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M7 17L17 7M7 7h10v10"/></svg>
+          </a>
+          <span v-else-if="cart.checkout_status === 'completed'" class="cart-status-pill mono">
+            <span class="spinner spinner-sm"></span>
+            Generating invoice…
+          </span>
+          <span v-else class="cart-status-pill mono">
+            <span class="spinner spinner-sm"></span>
+            {{ inflightLabel(cart) }}
+          </span>
+        </div>
+      </article>
+    </div>
+
+    <Teleport to="body">
+    <transition name="fade">
+      <div v-if="checkoutCart" class="modal-overlay" @click.self="closeCheckoutModal">
+        <div class="modal checkout-modal">
+          <header class="modal-header">
+            <div>
+              <div class="modal-title">Pick a profile</div>
+              <div class="modal-sub mono">Cart #{{ checkoutCart.id }} · {{ getDisplayName(checkoutCart.product_url) }}</div>
+            </div>
+            <button @click="closeCheckoutModal" class="icon-btn" aria-label="Close">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+            </button>
+          </header>
+          <div class="modal-body profile-picker">
+            <div v-if="profilesLoading" class="empty"><div class="empty-mark is-loading"><div class="spinner"></div></div><h3>Loading profiles…</h3></div>
+            <div v-else-if="profiles.length === 0" class="empty"><h3>No profiles yet</h3><p>Create a billing profile first.</p></div>
+            <button
+              v-else
+              v-for="p in profiles"
+              :key="p.id"
+              @click="selectProfile(p)"
+              class="profile-pick-row"
+              :class="{ 'is-used': usedProfileIds.has(p.id) }"
+              :disabled="submittingProfileId !== null"
+            >
+              <div class="profile-avatar mono">{{ initials(p.firstname, p.lastname) }}</div>
+              <div class="profile-pick-body">
+                <div class="profile-pick-top">
+                  <span class="profile-pick-name">{{ p.name }}</span>
+                  <span v-if="usedProfileIds.has(p.id)" class="used-tag mono">USED</span>
+                </div>
+                <div class="profile-pick-sub mono">{{ p.firstname }} {{ p.lastname }} · {{ p.email }}</div>
+              </div>
+              <div class="profile-pick-chevron" v-if="submittingProfileId !== p.id">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 6l6 6-6 6"/></svg>
+              </div>
+              <div v-else class="spinner"></div>
+            </button>
+          </div>
         </div>
       </div>
-    </div>
+    </transition>
+    </Teleport>
+
+    <transition name="toast">
+      <div v-if="toastMessage" class="toast mono">{{ toastMessage }}</div>
+    </transition>
   </div>
 </template>
 
 <script setup>
-import { onMounted, onUnmounted } from 'vue';
+import { onMounted, onUnmounted, ref, watch } from 'vue';
+import { useRoute, useRouter } from 'vue-router';
 import { useCartStore } from '../stores/cart';
+import { api } from '../stores/api';
+import { priceCategoryLabel } from '../constants';
 
 const cartStore = useCartStore();
+const route = useRoute();
+const router = useRouter();
+const toastMessage = ref('');
+
+// Checkout modal state
+const checkoutCart = ref(null);
+const profiles = ref([]);
+const usedProfileIds = ref(new Set());
+const profilesLoading = ref(false);
+const submittingProfileId = ref(null);
 
 const getDisplayName = (url) => {
-    try {
-        if (!url) return "Ticket Item";
-        if (url.includes('audi-interaction.com')) {
-           // Attempt to parse meaningful name from URL if possible
-           // e.g. /event/foo-bar
-           const parts = url.split('/');
-           const last = parts[parts.length - 1] || parts[parts.length - 2];
-           if (last) return last.replace(/-/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
-        }
-        return "Ticket Item";
-    } catch { return "Ticket Item"; }
+  try {
+    if (!url) return 'Ticket';
+    const parts = url.split('/');
+    const last = parts.filter(Boolean).pop() || '';
+    if (last) return last.replace(/-/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
+    return 'Ticket';
+  } catch { return 'Ticket'; }
 };
 
-const getCheckoutUrl = (cart) => {
-    if (cart.checkout_url) return cart.checkout_url;
-    // Fallback based on old code: window.location.origin + /checkout/ + token ? 
-    // Or maybe the backend provides a direct link. The old code had <a :href="/checkout/${cart.token}">
-    // But usually checkout is external? 
-    // Old code: href="`/checkout/${cart.token}`"
-    // So it's an internal route that redirects? Or a proxy?
-    // If the checkout_url is fully qualified from backend, use it. 
-    // If not, construct it. The backend model in schemas.py might clarify, but let's be safe.
-    if (cart.token) return `/checkout/${cart.token}`;
-    return '#';
+const getCheckoutUrl = (cart) => cart.token ? `/checkout/${cart.token}/cart` : '#';
+
+const flash = (msg) => {
+  toastMessage.value = msg;
+  setTimeout(() => { toastMessage.value = ''; }, 2400);
 };
 
+const copyToClipboard = (text) => {
+  if (navigator.clipboard && window.isSecureContext) {
+    navigator.clipboard.writeText(text);
+    return;
+  }
+  window.prompt('Cmd+C / Ctrl+C to copy:', text);
+};
+
+const copyCookie = async (cart) => {
+  try {
+    const resp = await fetch(`/api/checkout/${cart.token}/cookie`);
+    if (!resp.ok) { flash('Could not fetch cookie'); return; }
+    const data = await resp.json();
+    copyToClipboard(data.value);
+    flash('Cookie copied');
+  } catch {
+    flash('Error copying cookie');
+  }
+};
+
+// Status chip helpers — one source of truth for label + color.
+const STATUS_MAP = {
+  pending: { label: 'HELD', cls: 'badge-running', live: true },
+  running: { label: 'RUNNING', cls: 'badge-running', live: true },
+  billing_done: { label: 'BILLING ✓', cls: 'badge-running', live: true },
+  payment_confirmed: { label: 'PAYMENT ✓', cls: 'badge-running', live: true },
+  completed: { label: 'COMPLETED', cls: 'badge-success', live: false },
+  failed: { label: 'FAILED', cls: 'badge-failed', live: false },
+};
+const statusLabel = (cart) => {
+  if (cart.checkout_status === 'pending' && getRemaining(cart) < 180) return 'CRITICAL';
+  return (STATUS_MAP[cart.checkout_status] || STATUS_MAP.pending).label;
+};
+const statusBadgeClass = (cart) => {
+  if (cart.checkout_status === 'pending' && getRemaining(cart) < 180) return 'badge-failed';
+  return (STATUS_MAP[cart.checkout_status] || STATUS_MAP.pending).cls;
+};
+const isLiveStatus = (cart) => (STATUS_MAP[cart.checkout_status] || STATUS_MAP.pending).live;
+const INFLIGHT_LABELS = {
+  running: 'Running checkout…',
+  billing_done: 'Confirming payment…',
+  payment_confirmed: 'Placing order…',
+};
+const inflightLabel = (cart) => INFLIGHT_LABELS[cart.checkout_status] || 'Working…';
+
+const initials = (first = '', last = '') => ((first[0] || '') + (last[0] || '')).toUpperCase() || '—';
+
+const openCheckoutModal = async (cart) => {
+  checkoutCart.value = cart;
+  profilesLoading.value = true;
+  profiles.value = [];
+  usedProfileIds.value = new Set();
+  try {
+    const [profs, usage] = await Promise.all([
+      api.get('/api/billing/profiles'),
+      api.get(`/api/billing/profiles/usage?event_id=${encodeURIComponent(cart.event_id || '')}`),
+    ]);
+    profiles.value = profs;
+    usedProfileIds.value = new Set(usage.filter(u => u.used).map(u => u.profile_id));
+  } catch (e) {
+    flash('Failed to load profiles');
+    checkoutCart.value = null;
+  } finally {
+    profilesLoading.value = false;
+  }
+};
+
+const closeCheckoutModal = () => {
+  if (submittingProfileId.value !== null) return;
+  checkoutCart.value = null;
+  profiles.value = [];
+  usedProfileIds.value = new Set();
+};
+
+const selectProfile = async (profile) => {
+  if (!checkoutCart.value) return;
+  if (usedProfileIds.value.has(profile.id)) {
+    if (!confirm(`${profile.name} already checked out for this event. Run again anyway?`)) return;
+  }
+  submittingProfileId.value = profile.id;
+  try {
+    const res = await cartStore.triggerCheckout(checkoutCart.value.id, profile.id);
+    if (res && res.success) {
+      flash(`Checkout started with ${profile.name}`);
+    } else {
+      flash(`Checkout failed: ${res?.message || 'unknown'}`);
+    }
+    checkoutCart.value = null;
+  } catch (e) {
+    flash(`Error: ${e.message || 'request failed'}`);
+  } finally {
+    submittingProfileId.value = null;
+  }
+};
+
+// These helpers all touch cartStore.tick so the template re-evaluates each
+// second while cart identity stays stable (avoiding full card re-renders).
 const formatTime = (expiryDate) => {
-    const now = new Date();
-    const diff = Math.max(0, expiryDate - now);
-    const minutes = Math.floor(diff / 60000);
-    const seconds = Math.floor((diff % 60000) / 1000);
-    return `${minutes}:${seconds.toString().padStart(2, '0')}`;
+  cartStore.tick;
+  const diff = Math.max(0, expiryDate.getTime() - Date.now());
+  const m = Math.floor(diff / 60000);
+  const s = Math.floor((diff % 60000) / 1000);
+  return `${m}:${s.toString().padStart(2, '0')}`;
+};
+
+const getRemaining = (cart) => {
+  cartStore.tick;
+  return Math.floor(Math.max(0, cart.expires_at.getTime() - Date.now()) / 1000);
 };
 
 const getProgress = (expiryDate) => {
-    const now = new Date();
-    const totalDuration = 17 * 60 * 1000; // 17 minutes
-    const remaining = Math.max(0, expiryDate - now);
-    return Math.min(100, (remaining / totalDuration) * 100);
+  cartStore.tick;
+  const remaining = Math.max(0, expiryDate.getTime() - Date.now());
+  return Math.min(100, (remaining / (17 * 60 * 1000)) * 100);
 };
 
 let timer;
-onMounted(() => {
-    cartStore.fetchCarts();
-    timer = setInterval(() => {
-        cartStore.triggerUpdate(); 
-    }, 1000);
-});
+// ?pick=<cartId> deep link (push "tap to pick a profile"). Handled on mount AND
+// on query change — a push tapped while Carts is already open only changes the
+// query, so the component is reused and onMounted never re-runs.
+async function handlePick(raw) {
+  const pickId = Number(raw);
+  if (!Number.isFinite(pickId) || pickId <= 0) return;
+  let cart = cartStore.carts.find(c => c.id === pickId);
+  if (!cart) {  // arrived after our last fetch (e.g. via WebSocket) — refresh once
+    await cartStore.fetchCarts();
+    cart = cartStore.carts.find(c => c.id === pickId);
+  }
+  if (cart && (cart.checkout_status === 'pending' || cart.checkout_status === 'failed')) {
+    openCheckoutModal(cart);
+  }
+  router.replace({ path: '/carts' });
+}
 
-onUnmounted(() => {
-    if (timer) clearInterval(timer);
+onMounted(async () => {
+  await cartStore.fetchCarts();
+  timer = setInterval(() => { cartStore.triggerUpdate(); }, 1000);
+  await handlePick(route.query.pick);
 });
+watch(() => route.query.pick, (v) => { if (v) handlePick(v); });
+onUnmounted(() => { if (timer) clearInterval(timer); });
 </script>
 
 <style scoped>
-.carts-view {
-    padding: 1rem;
+.view-head {
+  display: flex; align-items: flex-end; justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 1.5rem;
+}
+.view-title {
+  font-size: clamp(1.5rem, 4vw, 2rem);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.1;
+  margin-top: 4px;
+}
+.ws-chip {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 6px 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--ink-2);
+  background: var(--surface);
 }
 
-.carts-grid { 
-    display: grid; 
-    grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); 
-    gap: 1.5rem; 
+.carts-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 12px;
+}
+@media (min-width: 640px) { .carts-grid { grid-template-columns: repeat(2, 1fr); } }
+@media (min-width: 1100px) { .carts-grid { grid-template-columns: repeat(3, 1fr); } }
+
+.cart-card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  display: flex; flex-direction: column;
+  transition: border-color 0.15s;
+}
+.cart-card.is-critical { border-color: color-mix(in oklab, var(--bad) 40%, var(--line)); }
+
+.cart-top {
+  padding: 14px 16px 10px;
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 12px;
 }
 
-.cart-card { 
-    background: white; 
-    border-radius: 16px; 
-    overflow: hidden; 
-    box-shadow: 0 4px 20px rgba(0,0,0,0.05); 
-    border: 1px solid #e5e5ea; 
-    display: flex;
-    flex-direction: column;
+.cart-timer { display: flex; flex-direction: column; }
+.cart-timer-label {
+  font-size: 0.625rem;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--ink-4);
+}
+.cart-timer-value {
+  font-size: 1.875rem;
+  font-weight: 700;
+  letter-spacing: -0.03em;
+  color: var(--ink);
+  margin-top: -2px;
+  line-height: 1;
+}
+.is-critical .cart-timer-value { color: var(--bad); }
+
+.progress-track {
+  height: 3px;
+  background: var(--line-soft);
+  overflow: hidden;
+}
+.progress-fill {
+  height: 100%;
+  background: var(--signal);
+  transition: width 1s linear;
+}
+.is-critical .progress-fill { background: var(--bad); }
+
+.cart-body { padding: 12px 16px; flex: 1; }
+.cart-title {
+  font-size: 0.9375rem; font-weight: 700;
+  letter-spacing: -0.005em;
+  color: var(--ink);
+  margin-bottom: 6px;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.aco-tag {
+  display: inline-block;
+  margin-right: 6px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: var(--signal-soft);
+  color: var(--signal);
+  font-size: 0.6875rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  vertical-align: 2px;
+}
+.cart-meta {
+  font-size: 0.75rem;
+  color: var(--ink-3);
+  display: flex; gap: 6px; flex-wrap: wrap;
+}
+.dot-sep { color: var(--ink-4); }
+
+.cart-profile {
+  margin-top: 8px;
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--ok) 14%, transparent);
+  color: var(--ok);
+  font-size: 0.6875rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+.cart-error {
+  margin-top: 8px;
+  font-size: 0.6875rem;
+  color: var(--bad);
+  word-break: break-word;
 }
 
-.card-header-blue { 
-    padding: 1rem; 
-    display: flex; 
-    justify-content: flex-end; 
+/* Profile picker modal */
+.checkout-modal { max-width: 460px; }
+.profile-picker { padding: 8px; display: flex; flex-direction: column; gap: 6px; }
+.profile-pick-row {
+  display: flex; align-items: center; gap: 12px;
+  padding: 10px 12px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  cursor: pointer;
+  text-align: left;
+  transition: border-color 0.15s, background 0.15s;
+  font-family: inherit;
+}
+.profile-pick-row:hover:not(:disabled) {
+  border-color: color-mix(in oklab, var(--ink) 30%, var(--line));
+  background: var(--surface-2, var(--surface));
+}
+.profile-pick-row:disabled { opacity: 0.6; cursor: not-allowed; }
+.profile-pick-row.is-used { background: color-mix(in oklab, var(--warn) 6%, transparent); }
+.profile-avatar {
+  width: 36px; height: 36px; flex-shrink: 0;
+  border-radius: 50%;
+  background: var(--line-soft);
+  color: var(--ink-2);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 0.75rem; font-weight: 700;
+  letter-spacing: 0.04em;
+}
+.profile-pick-body { flex: 1; min-width: 0; }
+.profile-pick-top { display: flex; align-items: center; gap: 8px; }
+.profile-pick-name { font-size: 0.9375rem; font-weight: 700; color: var(--ink); }
+.used-tag {
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: var(--warn);
+  color: white;
+  font-size: 0.625rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+}
+.profile-pick-sub {
+  font-size: 0.75rem;
+  color: var(--ink-3);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  margin-top: 2px;
+}
+.profile-pick-chevron { color: var(--ink-4); flex-shrink: 0; }
+
+.cart-actions {
+  padding: 10px 12px 12px;
+  display: flex;
+  gap: 6px;
+  border-top: 1px solid var(--line-soft);
+}
+.cart-actions .btn { height: 40px; font-size: 0.8125rem; flex: 1; }
+.cart-cta { flex: 2; }
+
+/* In-flight / waiting state — replaces the action button while the bot is
+   mid-ACO or while we're polling for the invoice. Visually neutral so it
+   doesn't compete with the active red CTAs elsewhere on the card. */
+.cart-status-pill {
+  flex: 2;
+  height: 40px;
+  display: flex; align-items: center; justify-content: center;
+  gap: 8px;
+  padding: 0 10px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--ink-3);
+  background: var(--surface-2);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.spinner-sm {
+  width: 12px; height: 12px;
+  border-width: 2px;
+  border-top-color: var(--ink-2);
+  flex-shrink: 0;
 }
 
-.timer-badge { 
-    background: rgba(0, 122, 255, 0.1); 
-    color: #007AFF; 
-    padding: 6px 12px; 
-    border-radius: 8px; 
-    font-weight: 700; 
-    font-family: monospace; 
-    display: flex; 
-    gap: 6px; 
-    align-items: center; 
+.spinner {
+  width: 18px; height: 18px;
+  border: 2px solid var(--line);
+  border-top-color: var(--ink);
+  border-radius: 50%;
+  animation: spin 0.9s linear infinite;
 }
+@keyframes spin { to { transform: rotate(360deg); } }
 
-.card-content { 
-    padding: 0 1.5rem 1.5rem; 
-    display: flex; 
-    gap: 1rem; 
-    align-items: center; 
-    flex-grow: 1;
+.toast {
+  position: fixed;
+  bottom: calc(80px + var(--safe-b));
+  left: 50%; transform: translateX(-50%);
+  padding: 10px 18px;
+  border-radius: 999px;
+  background: var(--ink);
+  color: var(--bg);
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  box-shadow: var(--shadow-modal);
+  z-index: 100;
 }
-
-.blue-icon-circle { 
-    width: 48px; 
-    height: 48px; 
-    border-radius: 50%; 
-    background: rgba(0, 122, 255, 0.1); 
-    color: #007AFF; 
-    display: flex; 
-    align-items: center; 
-    justify-content: center; 
-    font-size: 1.2rem; 
-    flex-shrink: 0;
-}
-
-.details h3 { 
-    font-size: 1.1rem; 
-    font-weight: 600; 
-    margin: 0 0 4px 0; 
-    color: #1c1c1e;
-}
-
-.meta { 
-    color: #6c6c70; 
-    font-size: 0.9rem; 
-    margin: 0;
-}
-
-.progress-bar-bg { 
-    height: 4px; 
-    background: #e5e5ea; 
-    width: 100%; 
-}
-
-.progress-bar-fill { 
-    height: 100%; 
-    background: #007AFF; 
-    transition: width 1s linear; 
-}
-
-.card-actions { 
-    padding: 0; 
-}
-
-.checkout-btn { 
-    display: block; 
-    width: 100%; 
-    padding: 16px; 
-    background: #007AFF; 
-    color: white; 
-    text-align: center; 
-    text-decoration: none; 
-    font-weight: 600; 
-    font-size: 1rem; 
-    transition: background 0.2s; 
-}
-
-.checkout-btn:hover { 
-    background: #0056b3; 
-}
-
-.empty-state { 
-    text-align: center; 
-    padding: 4rem 2rem; 
-    color: #6c6c70; 
-}
-
-.empty-icon { 
-    font-size: 3rem; 
-    margin-bottom: 1rem; 
-    opacity: 0.6; 
-}
-
-.loading-state {
-    text-align: center;
-    padding: 2rem;
-    color: #6c6c70;
-}
+@media (min-width: 900px) { .toast { bottom: 24px; } }
+.toast-enter-active, .toast-leave-active { transition: opacity 0.2s, transform 0.2s; }
+.toast-enter-from { opacity: 0; transform: translateX(-50%) translateY(8px); }
+.toast-leave-to { opacity: 0; transform: translateX(-50%) translateY(8px); }
 </style>

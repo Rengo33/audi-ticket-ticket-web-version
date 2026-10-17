@@ -1,338 +1,225 @@
 """
-Cart session and checkout proxy endpoints.
+Cart session list + mobile checkout proxy.
+
+The proxy is the only supported checkout path. It rewrites URLs in the
+upstream response so every subsequent request flows back through us,
+carrying the cart cookie in a long-lived per-cart curl_cffi session.
 """
+import asyncio
+import json
+import logging
+import re
 from datetime import datetime
-from typing import Optional
+from typing import Dict, Tuple
 
+from curl_cffi.requests import AsyncSession
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
-from curl_cffi.requests import Session as CurlSession
 
-from ..database import get_db
 from ..auth import get_current_user
-from ..models import CartSession
+from ..config import get_settings
+from ..database import get_db
+from ..models import BillingProfile, CartSession, Task
 from ..schemas import CartSessionResponse
 
+logger = logging.getLogger(__name__)
+settings = get_settings()
+
 router = APIRouter(tags=["checkout"])
+
+
+# ─── Cart session cache ──────────────────────────────────────────────
+# One AsyncSession per cart token so cookies stick across proxy hops.
+# Entries self-evict when their cart expires or is unreachable.
+_proxy_sessions: Dict[str, Tuple[AsyncSession, datetime]] = {}
+
+
+async def _evict_session(token: str) -> None:
+    entry = _proxy_sessions.pop(token, None)
+    if entry:
+        session, _ = entry
+        try:
+            await session.close()
+        except Exception:
+            pass
+
+
+async def _get_proxy_session(cart: CartSession) -> AsyncSession:
+    entry = _proxy_sessions.get(cart.token)
+    if entry is None:
+        session = AsyncSession(impersonate="chrome120")
+        session.cookies.set(cart.cookie_name, cart.cookie_value, domain=cart.cookie_domain)
+        _proxy_sessions[cart.token] = (session, cart.expires_at)
+        return session
+    return entry[0]
+
+
+async def _require_cart(token: str, db: Session) -> CartSession:
+    cart = db.query(CartSession).filter(CartSession.token == token).first()
+    if not cart:
+        raise HTTPException(404, "Session not found")
+    if datetime.utcnow() > cart.expires_at:
+        await _evict_session(token)
+        raise HTTPException(410, "Session expired")
+    return cart
+
+
+# ─── HTML rewrite ────────────────────────────────────────────────────
+# Single-pass regex replaces upstream links with our proxy prefix.
+# {PROXY} placeholder is substituted per-call.
+_REWRITE_RE = re.compile(
+    r"""https?://audidefuehrungen2\.regiondo\.de/"""                    # absolute
+    r"""|(?<=href=")/(?!/)(?!checkout/[^"]*/proxy/)"""                  # relative href (skip //)
+    r"""|(?<=href=')/(?!/)(?!checkout/[^']*/proxy/)"""
+    r"""|(?<=action=")/(?!/)(?!checkout/[^"]*/proxy/)"""
+    r"""|(?<=action=')/(?!/)(?!checkout/[^']*/proxy/)""",
+    re.IGNORECASE,
+)
+
+
+def rewrite_html_for_proxy(html: str, token: str) -> str:
+    """Rewrite upstream URLs to route back through the proxy."""
+    proxy = f"/checkout/{token}/proxy/"
+    html = _REWRITE_RE.sub(proxy, html)
+    if "<head>" in html and "<base " not in html:
+        html = html.replace("<head>", f'<head><base href="{proxy}">', 1)
+    return html
+
+
+def _rewrite_json_html(body: str, token: str) -> str:
+    """Walk the JSON body and rewrite any embedded HTML fragment."""
+    try:
+        data = json.loads(body)
+    except Exception:
+        return body.replace("https:\\/\\/audidefuehrungen2.regiondo.de\\/", f"/checkout/{token}/proxy/")
+    if isinstance(data, dict) and isinstance(data.get("html"), str):
+        data["html"] = rewrite_html_for_proxy(data["html"], token)
+    return json.dumps(data)
+
+
+# ─── Routes ──────────────────────────────────────────────────────────
 
 
 @router.get("/api/carts", response_model=list[CartSessionResponse])
 async def list_cart_sessions(
     db: Session = Depends(get_db),
-    _: bool = Depends(get_current_user)
+    _: bool = Depends(get_current_user),
 ):
-    """List all cart sessions."""
-    sessions = db.query(CartSession)\
-        .order_by(CartSession.created_at.desc())\
-        .limit(50)\
+    rows = (
+        db.query(CartSession, Task.auto_checkout)
+        .outerjoin(Task, CartSession.task_id == Task.id)
+        .order_by(CartSession.created_at.desc())
+        .limit(50)
         .all()
-    return sessions
+    )
+    profile_ids = {c.billing_profile_id for c, _ in rows if c.billing_profile_id}
+    profile_name_by_id: dict[int, str] = {}
+    if profile_ids:
+        for p in db.query(BillingProfile.id, BillingProfile.name).filter(
+            BillingProfile.id.in_(profile_ids)
+        ).all():
+            profile_name_by_id[p.id] = p.name
+    return [
+        {
+            "id": cart.id,
+            "token": cart.token,
+            "task_id": cart.task_id,
+            "event_id": cart.event_id,
+            "product_url": cart.product_url,
+            "checkout_url": cart.checkout_url,
+            "quantity": cart.quantity,
+            "price_category": cart.price_category or 0,
+            "checkout_status": cart.checkout_status,
+            "auto_checkout": bool(auto_checkout),
+            "billing_profile_id": cart.billing_profile_id,
+            "billing_profile_name": profile_name_by_id.get(cart.billing_profile_id) if cart.billing_profile_id else None,
+            "total_time": cart.total_time,
+            "invoice_url": cart.invoice_url,
+            "checkout_error": cart.checkout_error,
+            "created_at": cart.created_at,
+            "expires_at": cart.expires_at,
+            "used_at": cart.used_at,
+        }
+        for cart, auto_checkout in rows
+    ]
 
 
-@router.get("/checkout/{token}", response_class=HTMLResponse)
-async def checkout_proxy_page(
-    token: str,
-    db: Session = Depends(get_db)
+class ManualCheckoutBody(BaseModel):
+    billing_profile_id: int
+
+
+@router.post("/api/carts/{cart_id}/checkout")
+async def manual_checkout(
+    cart_id: int,
+    body: ManualCheckoutBody,
+    db: Session = Depends(get_db),
+    _: bool = Depends(get_current_user),
 ):
+    """Trigger ACO for a specific cart with a user-chosen profile.
+
+    The dispatcher's global lock prevents racing with auto-dispatch or a
+    duplicate click. `billing_profile_id` bypasses the used-check: the UI has
+    already shown the user that the profile is used (badge + confirm).
     """
-    Mobile checkout page.
-    No auth required - the token IS the auth.
-    """
-    cart = db.query(CartSession).filter(CartSession.token == token).first()
-    
+    cart = db.query(CartSession).filter(CartSession.id == cart_id).first()
     if not cart:
-        return HTMLResponse(
-            content="""
-            <!DOCTYPE html>
-            <html>
-            <head>
-                <meta charset="utf-8">
-                <meta name="viewport" content="width=device-width, initial-scale=1">
-                <title>Session Not Found</title>
-                <style>
-                    body { font-family: -apple-system, sans-serif; padding: 20px; text-align: center; background: #1a1a2e; color: white; }
-                    .error { color: #ff6b6b; font-size: 1.5em; margin-top: 50px; }
-                </style>
-            </head>
-            <body>
-                <div class="error">❌ Session nicht gefunden</div>
-                <p>Der Link ist ungültig oder abgelaufen.</p>
-            </body>
-            </html>
-            """,
-            status_code=404
-        )
-    
-    # Check if expired
+        raise HTTPException(404, "Cart not found")
+    if cart.checkout_status not in ("pending", "failed"):
+        raise HTTPException(409, f"Cart is {cart.checkout_status}, cannot start checkout")
     if datetime.utcnow() > cart.expires_at:
-        return HTMLResponse(
-            content="""
-            <!DOCTYPE html>
-            <html>
-            <head>
-                <meta charset="utf-8">
-                <meta name="viewport" content="width=device-width, initial-scale=1">
-                <title>Session Expired</title>
-                <style>
-                    body { font-family: -apple-system, sans-serif; padding: 20px; text-align: center; background: #1a1a2e; color: white; }
-                    .error { color: #ff6b6b; font-size: 1.5em; margin-top: 50px; }
-                </style>
-            </head>
-            <body>
-                <div class="error">⏰ Session abgelaufen</div>
-                <p>Die Warenkorb-Session ist nicht mehr gültig.</p>
-            </body>
-            </html>
-            """,
-            status_code=410
-        )
-    
-    # Calculate remaining time
-    remaining = (cart.expires_at - datetime.utcnow()).total_seconds()
-    remaining_min = int(remaining // 60)
-    remaining_sec = int(remaining % 60)
-    
-    return HTMLResponse(content=f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <meta charset="utf-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1">
-        <title>🎫 Checkout - Audi Tickets</title>
-        <style>
-            * {{ box-sizing: border-box; }}
-            body {{
-                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-                margin: 0;
-                padding: 20px;
-                background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
-                color: white;
-                min-height: 100vh;
-            }}
-            .container {{
-                max-width: 500px;
-                margin: 0 auto;
-            }}
-            .card {{
-                background: rgba(255,255,255,0.1);
-                border-radius: 16px;
-                padding: 24px;
-                margin-bottom: 20px;
-                backdrop-filter: blur(10px);
-            }}
-            .success-badge {{
-                background: #00c853;
-                color: white;
-                padding: 8px 16px;
-                border-radius: 20px;
-                font-weight: 600;
-                display: inline-block;
-                margin-bottom: 16px;
-            }}
-            h1 {{
-                margin: 0 0 8px 0;
-                font-size: 1.5em;
-            }}
-            .timer {{
-                font-size: 2.5em;
-                font-weight: bold;
-                color: #ffd700;
-                text-align: center;
-                margin: 20px 0;
-            }}
-            .timer-label {{
-                text-align: center;
-                color: #aaa;
-                font-size: 0.9em;
-            }}
-            .info-row {{
-                display: flex;
-                justify-content: space-between;
-                padding: 12px 0;
-                border-bottom: 1px solid rgba(255,255,255,0.1);
-            }}
-            .info-label {{ color: #aaa; }}
-            .info-value {{ font-weight: 600; }}
-            .checkout-btn {{
-                display: block;
-                width: 100%;
-                padding: 18px;
-                background: linear-gradient(135deg, #00c853 0%, #00e676 100%);
-                color: white;
-                text-decoration: none;
-                text-align: center;
-                font-size: 1.2em;
-                font-weight: bold;
-                border-radius: 12px;
-                margin-top: 20px;
-                box-shadow: 0 4px 15px rgba(0,200,83,0.4);
-            }}
-            .checkout-btn:active {{
-                transform: scale(0.98);
-            }}
-            .warning {{
-                background: rgba(255,193,7,0.2);
-                border: 1px solid #ffc107;
-                border-radius: 8px;
-                padding: 12px;
-                margin-top: 20px;
-                font-size: 0.9em;
-            }}
-        </style>
-    </head>
-    <body>
-        <div class="container">
-            <div class="card">
-                <span class="success-badge">✅ Im Warenkorb</span>
-                <h1>Audi Tickets</h1>
-                <p style="color: #aaa; margin: 0;">Menge: {cart.quantity}</p>
-            </div>
-            
-            <div class="card">
-                <div class="timer-label">Verbleibende Zeit</div>
-                <div class="timer" id="timer">{remaining_min:02d}:{remaining_sec:02d}</div>
-                <div class="timer-label">Minuten : Sekunden</div>
-            </div>
-            
-            <div class="card">
-                <div class="info-row">
-                    <span class="info-label">Cart Speed</span>
-                    <span class="info-value">{cart.total_time:.2f}s</span>
-                </div>
-                <div class="info-row">
-                    <span class="info-label">Session</span>
-                    <span class="info-value">{token[:8]}...</span>
-                </div>
-            </div>
-            
-            <a href="/checkout/{token}/cart" class="checkout-btn">
-                🛒 Jetzt zur Kasse
-            </a>
-            
-            <div class="warning">
-                ⚠️ <strong>Hinweis:</strong> Du wirst zur Checkout-Seite weitergeleitet. 
-                Gib dort deine Daten ein und schließe den Kauf ab, bevor die Zeit abläuft!
-            </div>
-        </div>
-        
-        <script>
-            let remaining = {int(remaining)};
-            const timerEl = document.getElementById('timer');
-            
-            setInterval(() => {{
-                remaining--;
-                if (remaining <= 0) {{
-                    timerEl.textContent = '00:00';
-                    timerEl.style.color = '#ff6b6b';
-                    return;
-                }}
-                const min = Math.floor(remaining / 60);
-                const sec = remaining % 60;
-                timerEl.textContent = String(min).padStart(2, '0') + ':' + String(sec).padStart(2, '0');
-                
-                if (remaining < 120) {{
-                    timerEl.style.color = '#ff6b6b';
-                }}
-            }}, 1000);
-        </script>
-    </body>
-    </html>
-    """)
+        raise HTTPException(410, "Cart expired")
+
+    from ..bot.aco_dispatcher import AcoDispatcher
+    ok, msg = await AcoDispatcher.get().run_checkout(
+        cart_id=cart.id,
+        profile_pool_ids=[],
+        forced_profile_id=body.billing_profile_id,
+    )
+    return {"success": ok, "message": msg}
 
 
-@router.get("/checkout/{token}/redirect")
-async def checkout_redirect(
-    token: str,
-    db: Session = Depends(get_db)
-):
-    """
-    Redirect to the proxy checkout page.
-    """
+@router.get("/api/checkout/{token}/cookie")
+async def get_checkout_cookie(token: str, db: Session = Depends(get_db)):
+    """Return the raw cookie so the frontend can offer a copy button. Token is the auth."""
+    cart = await _require_cart(token, db)
+    return JSONResponse(
+        content={
+            "name": cart.cookie_name,
+            "value": cart.cookie_value,
+            "domain": cart.cookie_domain,
+            "checkout_url": f"{settings.audi_base_url}/checkout/cart",
+            "expires_at": cart.expires_at.isoformat() + "Z",
+        }
+    )
+
+
+@router.get("/checkout/{token}")
+async def checkout_root(token: str, db: Session = Depends(get_db)):
+    """Legacy entry — redirect straight to the proxy cart."""
+    await _require_cart(token, db)
     return RedirectResponse(url=f"/checkout/{token}/cart", status_code=302)
 
 
-# Store sessions for reuse
-_proxy_sessions: dict = {}
-
-
-def get_proxy_session(cart) -> CurlSession:
-    """Get or create a session with the cart cookie."""
-    if cart.token not in _proxy_sessions:
-        session = CurlSession(impersonate="chrome120")
-        session.cookies.set(cart.cookie_name, cart.cookie_value, domain=cart.cookie_domain)
-        _proxy_sessions[cart.token] = session
-    return _proxy_sessions[cart.token]
-
-
-def rewrite_html_for_proxy(html: str, token: str, base_url: str) -> str:
-    """Rewrite HTML to route all requests through our proxy."""
-    
-    # Replace absolute URLs to Audi site with our proxy
-    html = html.replace(
-        'https://audidefuehrungen2.regiondo.de/',
-        f'/checkout/{token}/proxy/'
-    )
-    html = html.replace(
-        'http://audidefuehrungen2.regiondo.de/',
-        f'/checkout/{token}/proxy/'
-    )
-    
-    # Replace relative URLs
-    html = html.replace('href="/', f'href="/checkout/{token}/proxy/')
-    html = html.replace("href='/", f"href='/checkout/{token}/proxy/")
-    html = html.replace('action="/', f'action="/checkout/{token}/proxy/')
-    html = html.replace("action='/", f"action='/checkout/{token}/proxy/")
-    
-    # Fix form actions that are relative (no leading slash)
-    html = html.replace('action="checkout/', f'action="/checkout/{token}/proxy/checkout/')
-    
-    # Keep external resources (CSS/JS from CDNs) as-is
-    # But proxy the Audi-specific ones
-    
-    # Add base tag for any missed relative URLs
-    if '<head>' in html:
-        html = html.replace(
-            '<head>',
-            f'<head><base href="/checkout/{token}/proxy/">'
-        )
-    
-    return html
-
-
 @router.get("/checkout/{token}/cart")
-async def checkout_cart_page(
-    token: str,
-    db: Session = Depends(get_db)
-):
-    """
-    Proxy the Audi cart page - main entry point for mobile checkout.
-    """
-    cart = db.query(CartSession).filter(CartSession.token == token).first()
-    
-    if not cart:
-        raise HTTPException(404, "Session not found")
-    
-    if datetime.utcnow() > cart.expires_at:
-        raise HTTPException(410, "Session expired")
-    
-    # Mark as used
+async def checkout_cart_page(token: str, db: Session = Depends(get_db)):
+    cart = await _require_cart(token, db)
+
     if not cart.used_at:
         cart.used_at = datetime.utcnow()
         db.commit()
-    
+
+    session = await _get_proxy_session(cart)
     try:
-        session = get_proxy_session(cart)
-        response = session.get("https://audidefuehrungen2.regiondo.de/checkout/cart")
-        
-        if response.status_code == 200:
-            html = rewrite_html_for_proxy(response.text, token, "https://audidefuehrungen2.regiondo.de")
-            return HTMLResponse(content=html)
-        else:
-            raise HTTPException(502, f"Audi server returned {response.status_code}")
-            
+        response = await session.get(f"{settings.audi_base_url}/checkout/cart")
     except Exception as e:
-        raise HTTPException(502, f"Proxy error: {str(e)}")
+        raise HTTPException(502, f"Proxy error: {e}")
+
+    if response.status_code != 200:
+        raise HTTPException(502, f"Audi server returned {response.status_code}")
+
+    return HTMLResponse(content=rewrite_html_for_proxy(response.text, token))
 
 
 @router.get("/checkout/{token}/proxy/{path:path}")
@@ -340,43 +227,27 @@ async def checkout_proxy_get(
     token: str,
     path: str,
     request: Request,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
 ):
-    """
-    Proxy GET requests to Audi checkout.
-    """
-    cart = db.query(CartSession).filter(CartSession.token == token).first()
-    
-    if not cart:
-        raise HTTPException(404, "Session not found")
-    
-    if datetime.utcnow() > cart.expires_at:
-        raise HTTPException(410, "Session expired")
-    
-    target_url = f"https://audidefuehrungen2.regiondo.de/{path}"
+    cart = await _require_cart(token, db)
+    session = await _get_proxy_session(cart)
+
+    target = f"{settings.audi_base_url}/{path}"
     if request.query_params:
-        target_url += f"?{request.query_params}"
-    
+        target += f"?{request.query_params}"
+
     try:
-        session = get_proxy_session(cart)
-        response = session.get(target_url)
-        
-        content_type = response.headers.get('content-type', '')
-        
-        # If HTML, rewrite URLs
-        if 'text/html' in content_type:
-            html = rewrite_html_for_proxy(response.text, token, "https://audidefuehrungen2.regiondo.de")
-            return HTMLResponse(content=html, status_code=response.status_code)
-        
-        # For other content types, return as-is
-        return Response(
-            content=response.content,
-            status_code=response.status_code,
-            media_type=content_type
-        )
-            
+        response = await session.get(target)
     except Exception as e:
-        raise HTTPException(502, f"Proxy error: {str(e)}")
+        raise HTTPException(502, f"Proxy error: {e}")
+
+    ctype = response.headers.get("content-type", "")
+    if "text/html" in ctype:
+        return HTMLResponse(
+            content=rewrite_html_for_proxy(response.text, token),
+            status_code=response.status_code,
+        )
+    return Response(content=response.content, status_code=response.status_code, media_type=ctype)
 
 
 @router.post("/checkout/{token}/proxy/{path:path}")
@@ -384,76 +255,43 @@ async def checkout_proxy_post(
     token: str,
     path: str,
     request: Request,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
 ):
-    """
-    Proxy POST requests to Audi checkout (form submissions).
-    """
-    cart = db.query(CartSession).filter(CartSession.token == token).first()
-    
-    if not cart:
-        raise HTTPException(404, "Session not found")
-    
-    if datetime.utcnow() > cart.expires_at:
-        raise HTTPException(410, "Session expired")
-    
-    target_url = f"https://audidefuehrungen2.regiondo.de/{path}"
-    
+    cart = await _require_cart(token, db)
+    session = await _get_proxy_session(cart)
+
+    body = await request.body()
+    ctype = request.headers.get("content-type", "")
+    headers = {"Content-Type": ctype} if ctype else {}
+    data = body.decode("utf-8") if "application/x-www-form-urlencoded" in ctype else body
+
     try:
-        session = get_proxy_session(cart)
-        
-        # Get form data
-        content_type = request.headers.get('content-type', '')
-        
-        if 'application/x-www-form-urlencoded' in content_type:
-            body = await request.body()
-            response = session.post(
-                target_url,
-                data=body.decode('utf-8'),
-                headers={'Content-Type': content_type}
-            )
-        elif 'multipart/form-data' in content_type:
-            body = await request.body()
-            response = session.post(
-                target_url,
-                data=body,
-                headers={'Content-Type': content_type}
-            )
-        else:
-            body = await request.body()
-            response = session.post(
-                target_url,
-                data=body,
-                headers={'Content-Type': content_type} if content_type else {}
-            )
-        
-        response_content_type = response.headers.get('content-type', '')
-        
-        # Handle redirects
-        if response.status_code in [301, 302, 303, 307, 308]:
-            location = response.headers.get('location', '')
-            if location:
-                # Rewrite redirect URL to go through proxy
-                if location.startswith('https://audidefuehrungen2.regiondo.de/'):
-                    location = location.replace(
-                        'https://audidefuehrungen2.regiondo.de/',
-                        f'/checkout/{token}/proxy/'
-                    )
-                elif location.startswith('/'):
-                    location = f'/checkout/{token}/proxy{location}'
-                return RedirectResponse(url=location, status_code=response.status_code)
-        
-        # If HTML, rewrite URLs
-        if 'text/html' in response_content_type:
-            html = rewrite_html_for_proxy(response.text, token, "https://audidefuehrungen2.regiondo.de")
-            return HTMLResponse(content=html, status_code=response.status_code)
-        
-        # For other content types, return as-is
-        return Response(
-            content=response.content,
-            status_code=response.status_code,
-            media_type=response_content_type
-        )
-            
+        response = await session.post(f"{settings.audi_base_url}/{path}", data=data, headers=headers)
     except Exception as e:
-        raise HTTPException(502, f"Proxy error: {str(e)}")
+        raise HTTPException(502, f"Proxy error: {e}")
+
+    if response.status_code in (301, 302, 303, 307, 308):
+        location = response.headers.get("location", "")
+        if location.startswith(settings.audi_base_url + "/"):
+            location = location.replace(settings.audi_base_url + "/", f"/checkout/{token}/proxy/", 1)
+        elif location.startswith("/"):
+            location = f"/checkout/{token}/proxy{location}"
+        if location:
+            return RedirectResponse(url=location, status_code=response.status_code)
+
+    resp_ctype = response.headers.get("content-type", "")
+    text = response.text
+    looks_json = text.lstrip()[:1] in ("{", "[")
+
+    if "text/html" in resp_ctype and not looks_json:
+        return HTMLResponse(
+            content=rewrite_html_for_proxy(text, token),
+            status_code=response.status_code,
+        )
+    if looks_json:
+        return Response(
+            content=_rewrite_json_html(text, token),
+            status_code=response.status_code,
+            media_type="application/json",
+        )
+    return Response(content=response.content, status_code=response.status_code, media_type=resp_ctype)

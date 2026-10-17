@@ -1,7 +1,8 @@
 from datetime import datetime, timedelta
 from typing import Optional
-import secrets
 import hashlib
+import hmac
+import secrets
 
 from fastapi import HTTPException, Security, Depends, Request, status
 from fastapi.security import APIKeyHeader
@@ -27,8 +28,8 @@ def hash_password(password: str) -> str:
 
 
 def verify_password(password: str) -> bool:
-    """Verify password against configured app password."""
-    return password == settings.app_password
+    """Verify password against configured app password (constant-time)."""
+    return hmac.compare_digest(password.encode(), settings.app_password.encode())
 
 
 def create_session_token() -> str:
