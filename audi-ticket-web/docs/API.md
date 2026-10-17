@@ -163,7 +163,7 @@ For Bayern games, the availability API returns 3 variation IDs. The mapping (con
 │  Tasks | Games | Carts | Billing | Logs         │
 │  WebSocket ←──── Real-time updates              │
 └──────────────────────┬──────────────────────────┘
-                       │ HTTPS (audi-tickets.duckdns.org)
+                       │ HTTPS (audi.rengo-server.duckdns.org)
 ┌──────────────────────┴──────────────────────────┐
 │                  Nginx (SSL termination)         │
 └──────────────────────┬──────────────────────────┘
@@ -244,7 +244,7 @@ For Bayern games, the availability API returns 3 variation IDs. The mapping (con
 ### Infrastructure
 
 - **Server:** AWS EC2 (t3.micro, 1GB RAM, 2 vCPU)
-- **Domain:** audi-tickets.duckdns.org (Let's Encrypt SSL)
+- **Domain:** audi.rengo-server.duckdns.org (Let's Encrypt SSL)
 - **Docker:** backend (FastAPI + Playwright), frontend (Vue 3), nginx, certbot
 - **Database:** SQLite
 - **Notifications:** Discord webhook (rate-limited queue, 0.5s spacing)

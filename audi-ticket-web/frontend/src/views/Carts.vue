@@ -75,18 +75,23 @@
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M7 17L17 7M7 7h10v10"/></svg>
             </a>
           </template>
-          <a v-else-if="cart.invoice_url" :href="cart.invoice_url" target="_blank" rel="noopener" class="btn btn-primary cart-cta">
+          <a v-else-if="cart.checkout_status === 'completed' && cart.invoice_url" :href="cart.invoice_url" target="_blank" rel="noopener" class="btn btn-primary cart-cta">
             Invoice
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M7 17L17 7M7 7h10v10"/></svg>
           </a>
-          <a v-else :href="getCheckoutUrl(cart)" target="_blank" rel="noopener" class="btn btn-ghost cart-cta">
-            Open checkout
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M7 17L17 7M7 7h10v10"/></svg>
-          </a>
+          <span v-else-if="cart.checkout_status === 'completed'" class="cart-status-pill mono">
+            <span class="spinner spinner-sm"></span>
+            Generating invoice…
+          </span>
+          <span v-else class="cart-status-pill mono">
+            <span class="spinner spinner-sm"></span>
+            {{ inflightLabel(cart) }}
+          </span>
         </div>
       </article>
     </div>
 
+    <Teleport to="body">
     <transition name="fade">
       <div v-if="checkoutCart" class="modal-overlay" @click.self="closeCheckoutModal">
         <div class="modal checkout-modal">
@@ -128,6 +133,7 @@
         </div>
       </div>
     </transition>
+    </Teleport>
 
     <transition name="toast">
       <div v-if="toastMessage" class="toast mono">{{ toastMessage }}</div>
@@ -137,11 +143,14 @@
 
 <script setup>
 import { onMounted, onUnmounted, ref } from 'vue';
+import { useRoute, useRouter } from 'vue-router';
 import { useCartStore } from '../stores/cart';
 import { api } from '../stores/api';
 import { priceCategoryLabel } from '../constants';
 
 const cartStore = useCartStore();
+const route = useRoute();
+const router = useRouter();
 const toastMessage = ref('');
 
 // Checkout modal state
@@ -206,6 +215,12 @@ const statusBadgeClass = (cart) => {
   return (STATUS_MAP[cart.checkout_status] || STATUS_MAP.pending).cls;
 };
 const isLiveStatus = (cart) => (STATUS_MAP[cart.checkout_status] || STATUS_MAP.pending).live;
+const INFLIGHT_LABELS = {
+  running: 'Running checkout…',
+  billing_done: 'Confirming payment…',
+  payment_confirmed: 'Placing order…',
+};
+const inflightLabel = (cart) => INFLIGHT_LABELS[cart.checkout_status] || 'Working…';
 
 const initials = (first = '', last = '') => ((first[0] || '') + (last[0] || '')).toUpperCase() || '—';
 
@@ -282,6 +297,15 @@ let timer;
 onMounted(async () => {
   await cartStore.fetchCarts();
   timer = setInterval(() => { cartStore.triggerUpdate(); }, 1000);
+
+  const pickId = Number(route.query.pick);
+  if (Number.isFinite(pickId) && pickId > 0) {
+    const cart = cartStore.carts.find(c => c.id === pickId);
+    if (cart && (cart.checkout_status === 'pending' || cart.checkout_status === 'failed')) {
+      openCheckoutModal(cart);
+    }
+    router.replace({ path: '/carts' });
+  }
 });
 onUnmounted(() => { if (timer) clearInterval(timer); });
 </script>
@@ -469,6 +493,33 @@ onUnmounted(() => { if (timer) clearInterval(timer); });
 }
 .cart-actions .btn { height: 40px; font-size: 0.8125rem; flex: 1; }
 .cart-cta { flex: 2; }
+
+/* In-flight / waiting state — replaces the action button while the bot is
+   mid-ACO or while we're polling for the invoice. Visually neutral so it
+   doesn't compete with the active red CTAs elsewhere on the card. */
+.cart-status-pill {
+  flex: 2;
+  height: 40px;
+  display: flex; align-items: center; justify-content: center;
+  gap: 8px;
+  padding: 0 10px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--ink-3);
+  background: var(--surface-2);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.spinner-sm {
+  width: 12px; height: 12px;
+  border-width: 2px;
+  border-top-color: var(--ink-2);
+  flex-shrink: 0;
+}
 
 .spinner {
   width: 18px; height: 18px;

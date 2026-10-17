@@ -63,10 +63,11 @@
 
 <script setup>
 import { ref, onMounted, onUnmounted, nextTick } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRouter, useRoute } from 'vue-router'
 import { useAuthStore } from '../stores/auth'
 
 const router = useRouter()
+const route = useRoute()
 const authStore = useAuthStore()
 const password = ref('')
 const pwField = ref(null)
@@ -76,11 +77,19 @@ const countdown = ref('—')
 let tickTimer = null
 let fetchController = null
 
+// `/` followed by a non-slash, non-backslash. Rejects `//evil.com`,
+// `/\evil.com`, and any non-relative URL that could redirect off-origin.
+const SAFE_REDIRECT = /^\/[^/\\]/
+
 async function handleLogin() {
   if (!password.value || authStore.loading) return
   const success = await authStore.login(password.value)
-  if (success) router.push('/')
-  else await nextTick(() => pwField.value?.focus())
+  if (success) {
+    const redirect = typeof route.query.redirect === 'string' ? route.query.redirect : '/'
+    router.push(SAFE_REDIRECT.test(redirect) ? redirect : '/')
+  } else {
+    await nextTick(() => pwField.value?.focus())
+  }
 }
 
 function formatCountdown(kickoffMs) {
@@ -106,8 +115,15 @@ async function loadNextGame() {
     nextGame.value = data
     const kickoffMs = new Date(data.kickoff_utc).getTime()
     countdown.value = formatCountdown(kickoffMs)
+    if (tickTimer) clearInterval(tickTimer)
     tickTimer = setInterval(() => {
-      countdown.value = formatCountdown(kickoffMs)
+      const next = formatCountdown(kickoffMs)
+      countdown.value = next
+      // Stop ticking once the match is live — the value won't change anymore.
+      if (next === 'LIVE') {
+        clearInterval(tickTimer)
+        tickTimer = null
+      }
     }, 1000)
   } catch (e) {
     if (e.name !== 'AbortError') console.warn('Failed to load next game:', e)

@@ -67,49 +67,65 @@ class BayernScraper:
                            Set to None to return all locations.
         """
         games = []
-        seen_urls = set()
-        
+        found: Dict[str, Optional[str]] = {}  # url -> title from the listing, if usable
+
         try:
-            # Scrape multiple pages
-            for page in range(1, 10):
-                url = f"{self.BASE_URL}/kategorien?___store=wl_de&p={page}"
-                response = await self.session.get(url)
-                
-                if response.status_code != 200:
-                    logger.warning(f"Page {page} returned {response.status_code}")
-                    break
-                
-                soup = BeautifulSoup(response.text, 'html.parser')
-                
-                # Find all product links containing fc-bayern in URL
-                for link in soup.find_all('a', href=True):
+            def collect(html: str):
+                """Pull fc-bayern product links plus their listing title out of one page."""
+                for link in BeautifulSoup(html, 'html.parser').find_all('a', href=True):
                     href = link['href']
-                    if 'fc-bayern' in href.lower() and href not in seen_urls:
-                        seen_urls.add(href)
-                        
-                        # Try to get title from link text, or fetch from page
+                    if 'fc-bayern' in href.lower() and href not in found:
                         title = link.get_text(strip=True)
                         if not title or len(title) < 5 or 'fc bayern' not in title.lower():
-                            # Fetch the page to get proper title
-                            game = await self._get_game_details(href, None)
-                        else:
-                            game = await self._get_game_details(href, title)
-                        
-                        if game:
-                            # Filter by location if specified
-                            if location_filter and game.location.lower() != location_filter.lower():
-                                continue
-                            games.append(game)
-                
-                # Check if there's a next page
-                if 'p=' + str(page + 1) not in response.text:
-                    break
-                    
-                await asyncio.sleep(0.5)  # Rate limiting
-                
+                            title = None  # fall back to the title on the detail page
+                        found[href] = title
+
+            # Page 1 tells us how many pages there are, so the rest can be fetched
+            # together instead of one-by-one with a sleep in between.
+            page_url = lambda p: f"{self.BASE_URL}/kategorien?___store=wl_de&p={p}"
+            first = await self.session.get(page_url(1))
+            if first.status_code != 200:
+                logger.warning(f"Page 1 returned {first.status_code}")
+                return games
+            collect(first.text)
+
+            last_page = max(
+                (int(n) for n in re.findall(r'[?&]p=(\d{1,2})"', first.text)),
+                default=1,
+            )
+            if last_page > 1:
+                rest = await asyncio.gather(
+                    *(self.session.get(page_url(p)) for p in range(2, min(last_page, 9) + 1)),
+                    return_exceptions=True,
+                )
+                for p, response in enumerate(rest, start=2):
+                    if isinstance(response, Exception):
+                        logger.warning(f"Page {p} failed: {response}")
+                        continue
+                    if response.status_code != 200:
+                        logger.warning(f"Page {p} returned {response.status_code}")
+                        continue
+                    collect(response.text)
+
+            # One detail fetch per game, all in flight at once — 4 games turn
+            # ~12s of sequential requests into roughly one round trip.
+            results = await asyncio.gather(
+                *(self._get_game_details(u, t) for u, t in found.items()),
+                return_exceptions=True,
+            )
+            for game in results:
+                if isinstance(game, Exception):
+                    logger.error(f"Error getting game details: {game}")
+                    continue
+                if not game:
+                    continue
+                if location_filter and game.location.lower() != location_filter.lower():
+                    continue
+                games.append(game)
+
         except Exception as e:
             logger.error(f"Error scraping games: {e}")
-        
+
         logger.info(f"Found {len(games)} FC Bayern games (location: {location_filter or 'all'})")
         return games
     
@@ -147,7 +163,9 @@ class BayernScraper:
             opponent = ""
             location = ""
             
-            match = re.search(r'FC Bayern München\s*-\s*(.+?)\s*\((\w+)\)', title)
+            # Case-insensitive: the shop switched the product titles to all caps
+            # ("FC BAYERN MÜNCHEN - RB LEIPZIG (Ingolstadt)").
+            match = re.search(r'FC Bayern München\s*-\s*(.+?)\s*\((\w+)\)', title, re.IGNORECASE)
             if match:
                 opponent = match.group(1).strip()
                 location = match.group(2).strip()
@@ -169,11 +187,14 @@ class BayernScraper:
             
             # Parse sale date from VERKAUFSSTART
             sale_date = None
-            sale_match = re.search(r'VERKAUFSSTART[:\s]*(\w+),?\s*(\d{1,2})\.?\s*(\w+)\s*(\d{4})', html, re.IGNORECASE)
+            # Take the first "1. Oktober 2026" after VERKAUFSSTART; the words in
+            # between vary ("VERKAUFSSTART GEPLANT FÜR: DONNERSTAG, 01. OKTOBER 2026",
+            # "VERKAUFSSTART: MONTAG, 5. MAI 2026").
+            sale_match = re.search(r'VERKAUFSSTART[^<]{0,60}?(\d{1,2})\.\s*([A-Za-zÄÖÜäöü]+)\s+(\d{4})', html, re.IGNORECASE)
             if sale_match:
-                day = int(sale_match.group(2))
-                month_name = sale_match.group(3).lower()
-                year = int(sale_match.group(4))
+                day = int(sale_match.group(1))
+                month_name = sale_match.group(2).lower()
+                year = int(sale_match.group(3))
                 
                 # German month names
                 months = {
@@ -214,7 +235,7 @@ class BayernScraper:
             elif not sale_date and page_says_sold_out:
                 status = "sold_out"
             elif sale_date and sale_started:
-                is_available = await self._check_availability(url)
+                is_available = await self._check_availability(soup)
                 status = "on_sale"
 
             # Extract price categories (e.g. "Kategorie 1 - Block 136: 80,00 Euro")
@@ -248,13 +269,13 @@ class BayernScraper:
             logger.error(f"Error getting game details for {url}: {e}")
             return None
     
-    async def _check_availability(self, product_url: str) -> bool:
-        """Check if tickets are currently available for a game."""
+    async def _check_availability(self, soup: BeautifulSoup) -> bool:
+        """Check if tickets are currently available for a game.
+
+        Takes the already-parsed product page — refetching it here cost a second
+        100 KB download per on-sale game.
+        """
         try:
-            # Extract event ID from page
-            response = await self.session.get(product_url)
-            soup = BeautifulSoup(response.text, 'html.parser')
-            
             form = soup.find('form')
             if form and form.get('action'):
                 event_id = form['action'].split('/')[-1]
@@ -293,10 +314,78 @@ async def get_bayern_games() -> List[Dict[str, Any]]:
         return [g.to_dict() for g in games]
 
 
+BASE_URL = "https://audidefuehrungen2.regiondo.de"
+
+
+async def get_listing_product_urls() -> List[str]:
+    """Light discovery for the release detector: every product URL on the shop
+    listing, with NO per-product detail fetch. Just the 3 `/kategorien` pages.
+
+    Parses the GTM `productClick` dataLayer (`window.location='<product url>'`),
+    which is emitted once per product tile and is precise (no nav links). Falls
+    back to fc-bayern <a href> links if the dataLayer shape ever changes.
+    """
+    page_url = lambda p: f"{BASE_URL}/kategorien?___store=wl_de&p={p}"
+    htmls: List[str] = []
+    async with AsyncSession(impersonate="chrome120") as s:
+        first = await s.get(page_url(1))
+        if first.status_code != 200:
+            raise RuntimeError(f"listing page 1 returned {first.status_code}")
+        htmls.append(first.text)
+        last_page = max(
+            (int(n) for n in re.findall(r'[?&]p=(\d{1,2})"', first.text)),
+            default=1,
+        )
+        if last_page > 1:
+            rest = await asyncio.gather(
+                *(s.get(page_url(p)) for p in range(2, min(last_page, 9) + 1)),
+                return_exceptions=True,
+            )
+            for r in rest:
+                if not isinstance(r, Exception) and r.status_code == 200:
+                    htmls.append(r.text)
+
+    # Non-product paths that live at the site root alongside product slugs.
+    NAV = (
+        "checkout", "kategorien", "catalogsearch", "customer", "wishlist",
+        "sales", "review", "contacts", "accessibility", "sitemap",
+        "locationsitemap", "city", "media", "skin", "js", "catalog",
+    )
+
+    def is_product(u: str) -> bool:
+        if not u.startswith(BASE_URL):
+            return False
+        tail = u[len(BASE_URL):].split("?", 1)[0].split("#", 1)[0].strip("/")
+        # Product slugs are a single root-level segment with no extension
+        # (categories/cities use .html; nav uses the prefixes above).
+        if not tail or "/" in tail or "." in tail:
+            return False
+        return not tail.startswith(NAV)
+
+    urls = set()
+    for html in htmls:
+        # Primary: GTM productClick handlers (one per tile).
+        for m in re.findall(
+            r"window\.location\s*=\s*'(" + re.escape(BASE_URL) + r"/[^']+)'", html
+        ):
+            if is_product(m):
+                urls.add(m)
+        # Union with every product anchor on the page — the regex is lossy on its
+        # own, and an incomplete set makes old products look "new" to the detector.
+        for link in BeautifulSoup(html, "html.parser").find_all("a", href=True):
+            if is_product(link["href"]):
+                urls.add(link["href"])
+    return sorted(urls)
+
+
 # For testing
 if __name__ == "__main__":
     async def main():
         games = await get_bayern_games()
+        # Smoke check against the live shop: title parsing must yield a location,
+        # otherwise the location filter silently drops every game (0 games in the UI).
+        assert games, "no FC Bayern games found — check title/href parsing"
+        assert all(g["location"] for g in games), "game without location — title regex broke"
         for g in games:
             print(f"{g['title']}")
             print(f"  Match: {g['match_date']} {g['match_time']}")

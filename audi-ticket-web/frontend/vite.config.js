@@ -6,7 +6,7 @@ import vue from '@vitejs/plugin-vue'
 // Override for local backend:  VITE_API_TARGET=http://localhost:8000 npm run dev
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '')
-  const httpTarget = env.VITE_API_TARGET || 'https://audi-tickets.duckdns.org'
+  const httpTarget = env.VITE_API_TARGET || 'https://audi.rengo-server.duckdns.org'
   const wsTarget = httpTarget.replace(/^http/, 'ws')
 
   return {

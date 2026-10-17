@@ -54,6 +54,7 @@ class AvailabilityWatcher:
         self.scan_count = 0
         self._last_discord_data = None
         self._option_cache: Dict[str, str] = {}  # (variation,date,time) -> option_number
+        self._last_broadcast = 0.0
 
     @property
     def key(self) -> str:
@@ -133,25 +134,32 @@ class AvailabilityWatcher:
                 _prev_total = total_available
 
                 if sub_ids and (availability_changed or self.scan_count % 10 == 0):
+                    # synchronize_session=False: the watcher session never reads
+                    # these Task rows after the update, so we don't need fetch's
+                    # extra SELECT round-trip on a 1-second hot path.
                     db.query(Task).filter(Task.id.in_(sub_ids)).update({
                         Task.scan_count: self.scan_count,
                         Task.tickets_available: total_available,
                         Task.last_scan_at: now,
-                    }, synchronize_session='fetch')
+                    }, synchronize_session=False)
                     db.commit()
 
-                # Broadcast scan update once with all task IDs
-                now_iso = now.isoformat()
-                for task_id in sub_ids:
-                    await self.manager.broadcast({
-                        "type": "scan_update",
-                        "data": {
-                            "task_id": task_id,
-                            "scan_count": self.scan_count,
-                            "tickets_available": total_available,
-                            "last_scan_at": now_iso
-                        }
-                    })
+                # Broadcast scan update once with all task IDs. Every change goes out
+                # immediately; unchanged scans are capped at 2/s so a 0.1s interval
+                # doesn't push 10 messages per second per task into every browser.
+                if availability_changed or (time.monotonic() - self._last_broadcast) >= 0.5:
+                    self._last_broadcast = time.monotonic()
+                    now_iso = now.isoformat()
+                    for task_id in sub_ids:
+                        await self.manager.broadcast({
+                            "type": "scan_update",
+                            "data": {
+                                "task_id": task_id,
+                                "scan_count": self.scan_count,
+                                "tickets_available": total_available,
+                                "last_scan_at": now_iso
+                            }
+                        })
 
                 # Log periodically (always, regardless of availability)
                 if self.scan_count == 1 or self.scan_count % 50 == 0:
@@ -195,8 +203,18 @@ class AvailabilityWatcher:
             import traceback
             logger.error(f"[Watcher {self.key}] Fatal error after {_consecutive_errors} retries: {e}")
             logger.error(traceback.format_exc())
-            for sub in list(self.subscribers.values()):
-                await self.manager._mark_failed(sub.task_id, str(e), db)
+            # Open a fresh session — the loop's `db` may be in a poisoned
+            # transaction state, in which case _mark_failed silently no-ops
+            # and the row stays in 'running' forever.
+            err_db = SessionLocal()
+            try:
+                for sub in list(self.subscribers.values()):
+                    try:
+                        await self.manager._mark_failed(sub.task_id, str(e), err_db)
+                    except Exception as inner:
+                        logger.error(f"[Watcher {self.key}] _mark_failed for task {sub.task_id} failed: {inner}")
+            finally:
+                err_db.close()
         finally:
             if self._bot:
                 await self._bot.close_session()
@@ -232,7 +250,11 @@ class AvailabilityWatcher:
                         f"Attempting {sub.quantity} ticket(s) for {date} @ {ticket['time']} ({qty_available} available)", db)
 
                     time_encoded = quote(ticket['time'], safe='')
-                    time_short = ticket['time'][:5]
+                    # Send ticket_time exactly as the availability endpoint returned it.
+                    # Truncating to HH:MM is accepted for plain slots ("10:30:00") but the
+                    # shop rejects it for range slots ("10:00:00-16:00:00") with
+                    # "Die gewünschte Menge ist nicht verfügbar." Both verified live.
+                    time_short = ticket['time']
                     variations = ticket.get('variations', [])
                     if not variations:
                         continue
@@ -677,9 +699,9 @@ class TaskManager:
                 )
                 await send_push(
                     title="Cart secured",
-                    body=f"{quantity}× in {total_time:.1f}s — tap to checkout",
-                    url="/carts",
-                    tag=f"cart-task-{task_id}",
+                    body=f"{quantity}× in {total_time:.1f}s — tap to pick a profile",
+                    url=f"/carts?pick={cart_session.id}",
+                    tag=f"cart-{cart_session.id}",
                 )
 
                 return True

@@ -48,7 +48,23 @@ class Settings(BaseSettings):
         env_file_encoding = "utf-8"
 
 
+_DEFAULT_SECRETS = {
+    "secret_key": "your-secret-key-change-in-production",
+    "app_password": "changeme",
+}
+
+
 @lru_cache()
 def get_settings() -> Settings:
-    """Cached settings instance."""
-    return Settings()
+    """Cached settings instance. Refuses to start if required secrets are
+    still at their defaults — Fernet card encryption is keyed off SECRET_KEY,
+    so booting with the published default would mean every encrypted card in
+    the DB is decryptable from the repo source."""
+    s = Settings()
+    leaked = [k for k, v in _DEFAULT_SECRETS.items() if getattr(s, k) == v]
+    if leaked:
+        raise RuntimeError(
+            f"Refusing to start: {', '.join(leaked)} still at hardcoded default. "
+            "Set them via environment variables or .env before deploying."
+        )
+    return s

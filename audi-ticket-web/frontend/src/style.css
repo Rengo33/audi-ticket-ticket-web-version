@@ -57,6 +57,21 @@
   --radius: 8px;
   --radius-lg: 12px;
 
+  /* Motion — Apple's two knobs translated to CSS. Default UI is critically
+     damped (no overshoot); --ease-spring adds a touch of overshoot, reserved
+     for momentum-y moments (things arriving, committing). Press feedback is
+     instant on pointer-down. */
+  --ease-out: cubic-bezier(0.22, 0.61, 0.36, 1);        /* settle, no bounce */
+  --ease-spring: cubic-bezier(0.34, 1.4, 0.5, 1);        /* slight overshoot */
+  --dur-press: 110ms;
+  --dur-fast: 180ms;
+  --dur: 260ms;
+
+  /* Translucent material (chrome that floats over scrolling content). */
+  --material: color-mix(in oklab, var(--bg) 72%, transparent);
+  --material-blur: saturate(180%) blur(20px);
+  --material-edge: rgba(255, 255, 255, 0.5);
+
   --safe-b: env(safe-area-inset-bottom, 0px);
   --safe-t: env(safe-area-inset-top, 0px);
 
@@ -104,6 +119,9 @@
   --shadow-modal: 0 32px 80px -16px rgba(0, 0, 0, 0.75);
 
   --grid-line: rgba(255, 255, 255, 0.028);
+
+  --material: color-mix(in oklab, var(--bg) 68%, transparent);
+  --material-edge: rgba(255, 255, 255, 0.08);
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -114,10 +132,21 @@ html, body {
   background: var(--bg);
   color: var(--ink);
   font-family: var(--font-sans);
+  /* Body copy: comfortable leading, tracking near zero (§15). */
+  line-height: 1.5;
+  letter-spacing: 0;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   text-rendering: optimizeLegibility;
 }
+
+/* Typography discipline (§15): tracking is size-specific — tighten as type
+   grows, leave body near 0; leading tracks size inversely (tight on large,
+   looser on small). Headings and the shared title classes inherit this so the
+   whole app reads with one typographic voice. */
+h1, .view-title { letter-spacing: -0.022em; line-height: 1.08; }
+h2 { letter-spacing: -0.017em; line-height: 1.15; }
+h3 { letter-spacing: -0.012em; line-height: 1.25; }
 
 /* Selection */
 ::selection { background: var(--signal); color: var(--signal-ink); }
@@ -146,12 +175,14 @@ html, body {
   font-size: 0.875rem; font-weight: 600;
   letter-spacing: 0;
   cursor: pointer; border: 1px solid transparent;
-  transition: background 0.15s, border-color 0.15s, color 0.15s, transform 0.06s;
+  transition: background var(--dur-fast), border-color var(--dur-fast),
+              color var(--dur-fast), transform var(--dur-press) var(--ease-out);
   user-select: none;
   -webkit-tap-highlight-color: transparent;
   white-space: nowrap;
 }
-.btn:active { transform: translateY(1px); }
+/* Feedback on the press, instant (§1) — scale, the way iOS controls respond. */
+.btn:active:not(:disabled) { transform: scale(0.96); }
 .btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .btn-primary { background: var(--signal); color: var(--signal-ink); }
@@ -263,10 +294,12 @@ input:-webkit-autofill:focus {
   color: var(--ink-2);
   cursor: pointer;
   display: inline-flex; align-items: center; justify-content: center;
-  transition: background 0.15s, color 0.15s, border-color 0.15s;
+  transition: background var(--dur-fast), color var(--dur-fast),
+              border-color var(--dur-fast), transform var(--dur-press) var(--ease-out);
   -webkit-tap-highlight-color: transparent;
 }
 .icon-btn:hover { background: var(--surface-hover); color: var(--ink); border-color: var(--ink-3); }
+.icon-btn:active { transform: scale(0.92); }
 .icon-btn.is-danger:hover { color: var(--signal); border-color: var(--signal); background: var(--signal-soft); }
 .icon-btn.is-ok:hover { color: var(--ok); border-color: var(--ok); background: var(--ok-soft); }
 
@@ -288,7 +321,11 @@ input:-webkit-autofill:focus {
 
 /* Modal */
 .modal-overlay {
-  position: fixed; inset: 0;
+  position: fixed;
+  top: 0; left: 0; right: 0;
+  height: 100vh;
+  height: 100dvh; /* iOS Safari: pin to dynamic viewport so flex-end actually
+                     reaches the visible bottom, not behind the URL bar */
   background: var(--overlay);
   backdrop-filter: blur(4px);
   -webkit-backdrop-filter: blur(4px);
@@ -304,6 +341,7 @@ input:-webkit-autofill:focus {
   width: 100%;
   max-width: 520px;
   max-height: calc(100vh - 2rem);
+  max-height: calc(100dvh - 2rem);
   display: flex; flex-direction: column;
   overflow: hidden;
   position: relative;
@@ -389,9 +427,11 @@ input:-webkit-autofill:focus {
   cursor: pointer;
   font-size: 0.875rem;
   font-weight: 500;
-  transition: background 0.15s, border-color 0.15s;
+  transition: background var(--dur-fast), border-color var(--dur-fast),
+              transform var(--dur-press) var(--ease-out);
 }
 .check-row:hover { border-color: var(--signal); background: var(--signal-soft); }
+.check-row:active { transform: scale(0.99); }
 .check-row input[type="checkbox"] {
   width: 18px; height: 18px;
   accent-color: var(--signal);
@@ -435,22 +475,84 @@ input:-webkit-autofill:focus {
   line-height: 1.5;
 }
 
-/* Mobile niceties */
+/* Mobile — floating card. Matches the dock's pill aesthetic (inset from
+   edges, all corners rounded) instead of a flush bottom sheet. */
 @media (max-width: 768px) {
+  .modal-overlay {
+    padding: calc(var(--safe-t) + 12px) 12px calc(var(--safe-b) + 12px);
+    align-items: flex-end;
+  }
   .modal {
     align-self: flex-end;
     margin-bottom: 0;
-    max-height: 92vh;
-    border-radius: var(--radius-lg) var(--radius-lg) 0 0;
-    border-bottom: none;
+    max-height: calc(100vh - var(--safe-t) - var(--safe-b) - 24px);
+    max-height: calc(100dvh - var(--safe-t) - var(--safe-b) - 24px);
+    border-radius: var(--radius-lg);
   }
-  .modal-overlay { padding: 0; align-items: flex-end; }
+  /* Overlay padding supplies the safe-area inset on mobile. */
+  .modal-footer { padding-bottom: 1rem; }
 }
 
-/* Reduced motion */
+/* Per-page header (.view-head) — sticky on mobile so the page title and its
+   primary action stay reachable while scrolling. Solid background; the
+   negative box-shadow extends that bg 1rem upward to cover the buffer in
+   .stage-inner padding-top so scrolling content can't peek through between
+   the rail and the sticky header. When stuck, the shadow falls behind the
+   rail (rail z=40 > view-head z=30) and is hidden. */
+@media (max-width: 768px) {
+  .view-head {
+    position: sticky;
+    top: calc(var(--rail-h) + var(--safe-t));
+    z-index: 30;
+    margin: 0 -1rem 1rem;
+    padding: 0.75rem 1rem;
+    background: var(--bg);
+    border-bottom: 1px solid var(--line-soft);
+    box-shadow: 0 -1rem 0 var(--bg);
+  }
+}
+
+/* Materialize, don't just fade (§12): a modal arrives as a real surface —
+   scale + blur settling in — not a flat opacity pop. */
+@keyframes material-in {
+  from { opacity: 0; transform: scale(0.96); filter: blur(6px); }
+  to   { opacity: 1; transform: scale(1);    filter: blur(0); }
+}
+@keyframes scrim-in { from { opacity: 0; } to { opacity: 1; } }
+.modal-overlay { animation: scrim-in var(--dur-fast) var(--ease-out); }
+.modal { animation: material-in var(--dur) var(--ease-spring); transform-origin: center bottom; }
+
+/* Route transitions (App shell wraps <router-view> in <transition name="view">).
+   Quick cross-fade with a hair of vertical travel — enter and exit mirror. */
+.view-enter-active { transition: opacity var(--dur) var(--ease-out), transform var(--dur) var(--ease-out); }
+.view-leave-active { transition: opacity var(--dur-fast) var(--ease-out), transform var(--dur-fast) var(--ease-out); }
+.view-enter-from { opacity: 0; transform: translateY(8px); }
+.view-leave-to   { opacity: 0; transform: translateY(-4px); }
+
+/* Accessibility — reduced motion keeps gentle opacity feedback, drops travel
+   and overshoot (§14). */
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
     animation-duration: 0.01ms !important;
     transition-duration: 0.01ms !important;
+  }
+  .modal { animation: scrim-in var(--dur-fast) ease; }          /* fade only, no scale/blur */
+  .view-enter-from, .view-leave-to { transform: none; }          /* cross-fade, no slide */
+}
+
+/* Translucent surfaces turn frostier/solid when the user asks for less
+   transparency (§14). */
+@media (prefers-reduced-transparency: reduce) {
+  .dock, .rail, .modal-overlay {
+    background: var(--bg) !important;
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+  }
+}
+
+/* More contrast: near-solid chrome with a defined border (§14). */
+@media (prefers-contrast: more) {
+  .card, .btn, .input, input, select, textarea, .icon-btn, .check-row {
+    border-color: var(--ink-3) !important;
   }
 }

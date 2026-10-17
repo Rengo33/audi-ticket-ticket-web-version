@@ -57,13 +57,5 @@ export const useCartStore = defineStore('cart', () => {
       .sort((a, b) => a.expires_at - b.expires_at)
   })
 
-  // Completed ACO orders (any age) — kept visible so the user can download
-  // their invoice long after the 17-min cart hold has expired.
-  const completedCarts = computed(() =>
-    carts.value
-      .filter(c => c.checkout_status === 'completed' && c.invoice_url)
-      .sort((a, b) => b.expires_at - a.expires_at)
-  )
-
-  return { carts, loading, error, tick, fetchCarts, applyCartUpdate, triggerCheckout, triggerUpdate, validCarts, completedCarts }
+  return { carts, loading, error, tick, fetchCarts, applyCartUpdate, triggerCheckout, triggerUpdate, validCarts }
 })

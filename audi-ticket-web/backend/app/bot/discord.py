@@ -156,6 +156,20 @@ async def send_discord_notification(data: Dict[str, Any], product_url: str):
     await send_discord_message(msg)
 
 
+async def send_discord_new_event(product_url: str, carted: bool):
+    """Release detector found a new product on the shop listing."""
+    status = "🛒 Auto-carting now" if carted else "👀 Detected (no task started)"
+    msg = {
+        "username": "Audi Ticket Bot",
+        "embeds": [_embed(
+            "🚨 New event detected!",
+            0xDC052D,
+            [_field("Product", _product_label(product_url)), _field("Action", status)],
+        )]
+    }
+    await send_discord_message(msg)
+
+
 async def send_discord_cart_success(
     product_url: str,
     cookie: CookieData,

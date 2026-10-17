@@ -30,7 +30,11 @@
     <!-- Main view -->
     <main class="stage" :class="{ 'stage-auth': !authStore.token }">
       <div class="stage-inner">
-        <router-view />
+        <router-view v-slot="{ Component }">
+          <transition name="view" mode="out-in">
+            <component :is="Component" />
+          </transition>
+        </router-view>
       </div>
     </main>
 
@@ -69,7 +73,7 @@ const logout = () => { wsDisconnect(); authStore.logout(); router.push('/login')
 const tokenGetter = () => authStore.token;
 
 const navItems = [
-  { to: '/games',   label: 'Games',   icon: `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 3v18M3 12h18M5.6 5.6l12.8 12.8M18.4 5.6L5.6 18.4"/></svg>` },
+  { to: '/detector', label: 'Detector', icon: `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3M11 8v6M8 11h6"/></svg>` },
   { to: '/',        label: 'Tasks',   icon: `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 9h10M7 13h10M7 17h6"/></svg>` },
   { to: '/carts',   label: 'Carts',   icon: `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M2 4h3l2.5 12h12"/><path d="M7.5 16h12L22 7H6"/><circle cx="9" cy="20" r="1.5"/><circle cx="18" cy="20" r="1.5"/></svg>` },
   { to: '/billing', label: 'Billing', icon: `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="5.5" width="19" height="13" rx="2"/><path d="M2.5 10h19M6 15h3M12 15h2"/></svg>` },
@@ -97,7 +101,11 @@ onUnmounted(() => { wsDisconnect(); });
    Mobile:  top rail + bottom dock
    ──────────────────────────────────────────────────────────── */
 
+/* Mobile fixed-shell geometry — keep these in sync with actual rail/dock heights.
+   Desktop overrides these below with its sidebar layout. */
 .app {
+  --rail-h: 58px;
+  --dock-h: 64px;
   min-height: 100vh;
   min-height: 100dvh;
   display: grid;
@@ -107,13 +115,18 @@ onUnmounted(() => { wsDisconnect(); });
   grid-template-rows: 1fr;
 }
 
-/* TOP RAIL */
+/* TOP RAIL — fixed on mobile so iOS Safari's dynamic viewport can't slide it off.
+   Solid background: a translucent blur leaks scrolling content through, and we
+   want the rail + sticky page header to read as one continuous opaque strip. */
 .rail {
-  position: sticky; top: 0; z-index: 40;
-  background: color-mix(in oklab, var(--bg) 88%, transparent);
-  backdrop-filter: saturate(160%) blur(14px);
-  -webkit-backdrop-filter: saturate(160%) blur(14px);
+  position: fixed; top: 0; left: 0; right: 0; z-index: 40;
+  /* Translucent material (§12): content frosts under the chrome instead of
+     hitting an opaque wall. Bright top edge = light catching the glass. */
+  background: var(--material);
+  backdrop-filter: var(--material-blur);
+  -webkit-backdrop-filter: var(--material-blur);
   border-bottom: 1px solid var(--line);
+  box-shadow: inset 0 1px 0 var(--material-edge);
   padding-top: var(--safe-t);
 }
 .rail-inner {
@@ -188,28 +201,52 @@ onUnmounted(() => { wsDisconnect(); });
   color: var(--ink-2);
   display: inline-flex; align-items: center; justify-content: center;
   cursor: pointer;
-  transition: background 0.15s, color 0.15s, border-color 0.15s;
+  transition: background var(--dur-fast), color var(--dur-fast),
+              border-color var(--dur-fast), transform var(--dur-press) var(--ease-out);
   -webkit-tap-highlight-color: transparent;
 }
 .rail-btn:hover { background: var(--surface-hover); color: var(--ink); }
+.rail-btn:active { transform: scale(0.9); }
 
-/* STAGE (main content) */
+/* STAGE (main content) — on mobile the stage itself owns scroll (body-level
+   scrolling fights the fixed rail/dock on iOS Safari). Padding reserves room
+   so content isn't trapped under the fixed bars. */
 .stage { min-height: 0; }
+.app[data-auth="in"] {
+  height: 100vh;
+  height: 100dvh;
+  overflow: hidden;
+}
+.app[data-auth="in"] .stage {
+  overflow-y: auto;
+  overflow-x: hidden;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior-y: contain;
+}
 .stage-inner {
   max-width: 1440px;
   margin: 0 auto;
-  padding: 1.25rem 1rem 1.5rem;
+  padding:
+    calc(var(--rail-h) + var(--safe-t) + 1rem)
+    1rem
+    calc(var(--dock-h) + var(--safe-b) + 1.25rem);
 }
 .stage-auth .stage-inner { padding: 0; max-width: 100%; }
 
-/* DOCK (nav) — bottom on mobile, side on desktop */
+/* DOCK (nav) — floating pill on mobile, side rail on desktop.
+   Floating pill: fixed to viewport, inset a bit from edges, so it reads as
+   app UI instead of welding to Safari's URL bar. */
 .dock {
-  position: sticky; bottom: 0; z-index: 40;
-  padding-bottom: var(--safe-b);
-  background: color-mix(in oklab, var(--bg) 88%, transparent);
-  backdrop-filter: saturate(160%) blur(14px);
-  -webkit-backdrop-filter: saturate(160%) blur(14px);
-  border-top: 1px solid var(--line);
+  position: fixed;
+  left: 12px; right: 12px;
+  bottom: calc(var(--safe-b) + 10px);
+  z-index: 40;
+  background: color-mix(in oklab, var(--bg) 82%, transparent);
+  backdrop-filter: saturate(180%) blur(18px);
+  -webkit-backdrop-filter: saturate(180%) blur(18px);
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  box-shadow: 0 10px 30px -12px rgba(0, 0, 0, 0.35), 0 2px 8px -4px rgba(0, 0, 0, 0.2);
 }
 .dock-inner {
   max-width: 640px;
@@ -226,22 +263,24 @@ onUnmounted(() => { wsDisconnect(); });
   text-decoration: none;
   color: var(--ink-3);
   border-radius: 10px;
-  transition: color 0.15s, background 0.15s;
+  transition: color var(--dur-fast), background var(--dur-fast),
+              transform var(--dur-press) var(--ease-out);
   min-height: 52px;
   -webkit-tap-highlight-color: transparent;
   position: relative;
 }
 .dock-link:hover { color: var(--ink); }
+.dock-link:active { transform: scale(0.94); }
 .dock-link.router-link-exact-active {
   color: var(--ink);
 }
 .dock-link.router-link-exact-active::before {
   content: "";
-  position: absolute; top: 0; left: 50%;
-  width: 28px; height: 2px;
+  position: absolute; bottom: 2px; left: 50%;
+  width: 22px; height: 2px;
   background: var(--signal);
   transform: translateX(-50%);
-  border-radius: 0 0 2px 2px;
+  border-radius: 2px;
 }
 .dock-icon { display: inline-flex; }
 .dock-icon svg { width: 22px; height: 22px; }
@@ -253,7 +292,7 @@ onUnmounted(() => { wsDisconnect(); });
   text-transform: uppercase;
 }
 
-/* Desktop: switch to sidebar */
+/* Desktop: switch to sidebar — undo mobile fixed/floating and use grid + sticky */
 @media (min-width: 900px) {
   .app { grid-template-columns: 220px 1fr; grid-template-rows: auto 1fr; }
   .app[data-auth="in"] { grid-template-areas: "rail rail" "dock stage"; }
@@ -261,16 +300,23 @@ onUnmounted(() => { wsDisconnect(); });
      cleanly. Without it Chrome creates implicit tracks and the stage lands in an
      unintended column. */
   .app[data-auth="out"] { grid-template-columns: 1fr; grid-template-rows: 1fr; grid-template-areas: "stage"; }
-  .rail { grid-area: rail; }
+  .rail {
+    grid-area: rail;
+    position: sticky;
+    left: auto; right: auto;
+  }
   .stage { grid-area: stage; }
   .dock {
     grid-area: dock;
     position: sticky;
     top: 57px; /* sits under rail */
+    left: auto; right: auto; bottom: auto;
     align-self: start;
     height: calc(100dvh - 57px - var(--safe-b));
-    border-top: none;
+    border: none;
     border-right: 1px solid var(--line);
+    border-radius: 0;
+    box-shadow: none;
     padding: 12px 12px calc(12px + var(--safe-b));
     background: var(--bg);
   }
@@ -297,6 +343,7 @@ onUnmounted(() => { wsDisconnect(); });
   }
   .dock-link.router-link-exact-active::before {
     top: 50%;
+    bottom: auto;
     left: -12px;
     width: 3px;
     height: 20px;

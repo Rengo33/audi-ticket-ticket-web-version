@@ -58,6 +58,7 @@
     </div>
 
     <!-- Modal -->
+    <Teleport to="body">
     <transition name="fade">
     <div v-if="showModal" class="modal-overlay" @click.self="closeModal">
       <div class="modal">
@@ -131,6 +132,7 @@
       </div>
     </div>
     </transition>
+    </Teleport>
   </div>
 </template>
 

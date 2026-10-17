@@ -14,14 +14,18 @@ const routes = [
     meta: { requiresAuth: true }
   },
   {
-    path: '/games',
-    name: 'Games',
-    component: () => import('./views/Games.vue'),
-    meta: { requiresAuth: true }
-  },
-  {
     path: '/tasks',
     redirect: '/'
+  },
+  {
+    path: '/games',
+    redirect: '/'
+  },
+  {
+    path: '/detector',
+    name: 'Detector',
+    component: () => import('./views/Detector.vue'),
+    meta: { requiresAuth: true }
   },
   {
     path: '/carts',
@@ -51,9 +55,11 @@ const router = createRouter({
 // Navigation guard
 router.beforeEach((to, from, next) => {
   const authStore = useAuthStore()
-  
+
   if (to.meta.requiresAuth && !authStore.isLoggedIn) {
-    next('/login')
+    // Preserve intended destination (full path + query) so Login can resume it.
+    const redirect = to.fullPath && to.fullPath !== '/' ? to.fullPath : undefined
+    next(redirect ? { path: '/login', query: { redirect } } : '/login')
   } else if (to.path === '/login' && authStore.isLoggedIn) {
     next('/')
   } else {

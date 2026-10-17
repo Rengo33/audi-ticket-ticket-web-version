@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Float, DateTime, Text, Boolean, Enum as SQLEnum
+from sqlalchemy import Column, ForeignKey, Integer, String, Float, DateTime, Text, Boolean, Enum as SQLEnum
 from sqlalchemy.sql import func
 from datetime import datetime
 import enum
@@ -59,9 +59,12 @@ class CartSession(Base):
     # Link token (for /checkout/{token} URL)
     token = Column(String(64), unique=True, index=True, nullable=False)
     
-    # Task reference
-    task_id = Column(Integer, nullable=True)
-    event_id = Column(String(100), nullable=True, index=True)  # Cached from Task.event_id for profile-usage tracking after task deletion
+    # Task reference. SET NULL on delete: keep orphaned carts so the user can
+    # still manual-checkout an active hold even after the task is removed.
+    # event_id is cached separately so profile-usage tracking survives the
+    # nulled task_id.
+    task_id = Column(Integer, ForeignKey("tasks.id", ondelete="SET NULL"), nullable=True)
+    event_id = Column(String(100), nullable=True, index=True)
 
     # Cookie data
     cookie_name = Column(String(100), nullable=False)
@@ -97,8 +100,9 @@ class TaskLog(Base):
     __tablename__ = "task_logs"
     
     id = Column(Integer, primary_key=True, index=True)
-    task_id = Column(Integer, nullable=False, index=True)
-    
+    # CASCADE: logs are tied to the task lifecycle; deleting the task drops them.
+    task_id = Column(Integer, ForeignKey("tasks.id", ondelete="CASCADE"), nullable=False, index=True)
+
     level = Column(String(20), default="info")  # info, warning, error, success
     message = Column(Text, nullable=False)
     
@@ -128,7 +132,8 @@ class ScheduledTask(Base):
     
     # Status
     status = Column(String(20), default="scheduled")  # scheduled, triggered, completed, failed
-    task_id = Column(Integer, nullable=True)  # Reference to created Task when triggered
+    # SET NULL: keep schedule history visible after the underlying task is purged.
+    task_id = Column(Integer, ForeignKey("tasks.id", ondelete="SET NULL"), nullable=True)
     
     # Timestamps
     created_at = Column(DateTime, default=func.now())
@@ -179,3 +184,36 @@ class PushSubscription(Base):
     user_agent = Column(String(300), nullable=True)
     created_at = Column(DateTime, default=func.now())
     last_sent_at = Column(DateTime, nullable=True)
+
+
+class ReleaseDetector(Base):
+    """Single-row config + state for the new-release auto-detector.
+
+    Polls the shop listing, diffs product URLs against `known_urls`, and when a
+    new one appears it auto-creates and starts a monitoring Task (reusing the
+    normal ATC/ACO path). Always id=1.
+    """
+    __tablename__ = "release_detector"
+
+    id = Column(Integer, primary_key=True, default=1)
+    active = Column(Boolean, default=False)
+    poll_interval = Column(Float, default=10.0)  # seconds between listing scrapes
+
+    # Which new products to ACT on. Substring match on the product URL (case-insensitive).
+    # "fc-bayern" = all matches; "dortmund" = only Dortmund; "" = every new product.
+    keyword = Column(String(200), default="fc-bayern")
+
+    # Task settings applied to each auto-created task
+    quantity = Column(Integer, default=1)
+    num_threads = Column(Integer, default=1)
+    price_category = Column(Integer, default=0)
+    auto_checkout = Column(Boolean, default=False)
+    billing_profile_id = Column(String(100), nullable=True)
+
+    # State (JSON-encoded lists)
+    known_urls = Column(Text, default="[]")      # seen product URLs (seeded on first activation)
+    events_log = Column(Text, default="[]")       # recent detections [{url, at, task_id}], capped
+    scan_count = Column(Integer, default=0)
+    last_scan_at = Column(DateTime, nullable=True)
+    last_new_found_at = Column(DateTime, nullable=True)
+    error_message = Column(Text, nullable=True)

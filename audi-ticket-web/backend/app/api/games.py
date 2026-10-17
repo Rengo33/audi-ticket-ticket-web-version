@@ -20,11 +20,13 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/games", tags=["games"])
 
-# Cache for games (refresh every 15 minutes)
+# Cache for games (refresh every 15 minutes). Lock prevents N concurrent
+# dashboard hits on a stale cache from triggering N parallel scrapes.
 _games_cache = {
     "data": [],
     "updated_at": None
 }
+_games_cache_lock = asyncio.Lock()
 CACHE_TTL = 900  # 15 minutes
 
 
@@ -48,23 +50,31 @@ def _kickoff_utc(game: dict) -> Optional[datetime]:
         return None
 
 
+def _cache_is_fresh(now: datetime) -> bool:
+    return bool(_games_cache["updated_at"]) and (now - _games_cache["updated_at"]).total_seconds() < CACHE_TTL
+
+
 async def _ensure_games_cache() -> list:
     """Return games list from cache or refresh if stale. Falls back to stale cache on scrape error."""
-    global _games_cache
     now = datetime.utcnow()
-    if _games_cache["updated_at"] and (now - _games_cache["updated_at"]).total_seconds() < CACHE_TTL:
+    if _cache_is_fresh(now):
         return _games_cache["data"]
-    try:
-        games = await get_bayern_games()
-        _games_cache["data"] = games
-        _games_cache["updated_at"] = now
-        logger.info(f"Refreshed games cache: {len(games)} games")
-        return games
-    except Exception as e:
-        logger.error(f"Error fetching games: {e}")
-        if _games_cache["data"]:
+    async with _games_cache_lock:
+        # Re-check inside the lock — another coroutine may have just refreshed.
+        now = datetime.utcnow()
+        if _cache_is_fresh(now):
             return _games_cache["data"]
-        raise HTTPException(status_code=500, detail="Failed to fetch games")
+        try:
+            games = await get_bayern_games()
+            _games_cache["data"] = games
+            _games_cache["updated_at"] = now
+            logger.info(f"Refreshed games cache: {len(games)} games")
+            return games
+        except Exception as e:
+            logger.error(f"Error fetching games: {e}")
+            if _games_cache["data"]:
+                return _games_cache["data"]
+            raise HTTPException(status_code=500, detail="Failed to fetch games")
 
 
 @router.get("/next", response_model=Optional[NextGameResponse])

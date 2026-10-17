@@ -56,7 +56,7 @@
           <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 9h10M7 13h10M7 17h6"/></svg>
         </div>
         <h3>No active tasks</h3>
-        <p>Create one from a product URL or schedule one from the Games tab.</p>
+        <p>Create one from a product URL, or let the Detector auto-start tasks on new releases.</p>
       </div>
       <div v-else class="cards">
         <article v-for="task in taskStore.tasks" :key="task.id" class="task-card" :class="'is-' + task.status">
@@ -124,6 +124,11 @@
     </section>
 
     <!-- Create Modal -->
+    <!-- Teleport to body so the overlay escapes .stage's overflow:auto.
+         iOS Safari uses the scroll container as the containing block for
+         position:fixed descendants, which pushes the bottom-aligned modal
+         off-screen behind the dock. -->
+    <Teleport to="body">
     <transition name="fade">
     <div v-if="showModal" class="modal-overlay" @click.self="showModal = false">
       <div class="modal">
@@ -187,6 +192,7 @@
       </div>
     </div>
     </transition>
+    </Teleport>
   </div>
 </template>
 

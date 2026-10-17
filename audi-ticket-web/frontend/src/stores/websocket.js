@@ -9,6 +9,8 @@ let reconnectTimer = null
 let getTokenFn = null
 let failCount = 0
 let pingInterval = null
+const MAX_RECONNECTS = 12
+const MAX_BACKOFF_MS = 30000
 
 function getWsUrl(token) {
   const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
@@ -42,16 +44,23 @@ export function useWebSocket() {
       }
     }
 
-    ws.onclose = () => {
+    ws.onclose = (ev) => {
       connected.value = false
       ws = null
+      // 4401 / 4403 ≈ auth-rejection close codes (server sets these on
+      // expired / invalid tokens). No point retrying with the same token —
+      // the auth store will redirect to /login on the next API call anyway.
+      if (ev.code === 4401 || ev.code === 4403) return
       failCount++
-      // Stop reconnecting after 3 consecutive failures (likely invalid token)
-      if (failCount >= 3) return
+      if (failCount > MAX_RECONNECTS) {
+        console.warn(`WS giving up after ${MAX_RECONNECTS} reconnect attempts`)
+        return
+      }
+      const backoff = Math.min(MAX_BACKOFF_MS, 1000 * 2 ** Math.min(failCount, 5))
       reconnectTimer = setTimeout(() => {
         const freshToken = getTokenFn ? getTokenFn() : null
         if (freshToken) connect(freshToken)
-      }, 3000)
+      }, backoff)
     }
 
     ws.onerror = () => {

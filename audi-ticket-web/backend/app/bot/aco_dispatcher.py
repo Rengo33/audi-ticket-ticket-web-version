@@ -78,6 +78,31 @@ async def _broadcast_cart_update(cart: CartSession):
         pass
 
 
+async def _poll_invoice_in_background(cart_id: int, cookie_name: str, cookie_value: str):
+    """Poll Regiondo for the signed tax-invoice PDF URL after the order is
+    placed. Runs detached so the dispatcher lock releases as soon as the
+    order is committed — Regiondo generates the PDF async (~5-30s) and the
+    cart can show 'completed' in the meantime."""
+    try:
+        async with AutoCheckout(cookie_name, cookie_value) as aco:
+            url = await aco._poll_invoice_url(timeout_s=60)
+        if not url:
+            return
+        db = SessionLocal()
+        try:
+            cart = db.query(CartSession).filter(CartSession.id == cart_id).first()
+            if not cart or cart.invoice_url:
+                return
+            cart.invoice_url = url
+            db.commit()
+            db.refresh(cart)
+            await _broadcast_cart_update(cart)
+        finally:
+            db.close()
+    except Exception as e:
+        logger.error(f"[ACO] background invoice poll failed for cart {cart_id}: {e}")
+
+
 async def run_single_checkout(cart: CartSession, profile: BillingProfile, db: Session) -> bool:
     """Run the three-step checkout for one (cart, profile). Returns True on completed order.
 
@@ -100,7 +125,7 @@ async def run_single_checkout(cart: CartSession, profile: BillingProfile, db: Se
             await send_push(
                 title="Billing failed",
                 body=f"Cart #{cart.id}: {result.message}",
-                url="/carts",
+                url=f"/carts?pick={cart.id}",
                 tag=f"cart-{cart.id}",
             )
             return False
@@ -133,7 +158,7 @@ async def run_single_checkout(cart: CartSession, profile: BillingProfile, db: Se
             await send_push(
                 title="Payment failed",
                 body=f"Cart #{cart.id}: {result.message}",
-                url="/carts",
+                url=f"/carts?pick={cart.id}",
                 tag=f"cart-{cart.id}",
             )
             return False
@@ -153,11 +178,11 @@ async def run_single_checkout(cart: CartSession, profile: BillingProfile, db: Se
         if order_result.success:
             await _log(task_id, "success", f"ACO: Cart {cart.id} — {order_result.message}", db)
             cart.checkout_status = "completed"
-            if order_result.invoice_url:
-                cart.invoice_url = order_result.invoice_url
-                await _log(task_id, "info", f"ACO: Invoice URL saved for cart {cart.id}", db)
             db.commit()
             await _broadcast_cart_update(cart)
+            asyncio.create_task(
+                _poll_invoice_in_background(cart.id, cart.cookie_name, cart.cookie_value)
+            )
             await send_discord_aco_update(
                 product_url, "completed",
                 profile_name=profile.name, profile_email=profile.email,
@@ -189,7 +214,7 @@ async def run_single_checkout(cart: CartSession, profile: BillingProfile, db: Se
         await send_push(
             title="Order failed",
             body=f"Cart #{cart.id}: {order_result.message}",
-            url="/carts",
+            url=f"/carts?pick={cart.id}",
             tag=f"cart-{cart.id}",
         )
         return False
