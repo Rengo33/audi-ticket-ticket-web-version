@@ -13,7 +13,7 @@ from datetime import datetime
 
 from ..database import SessionLocal
 from ..models import Task, ReleaseDetector
-from .scraper import get_listing_product_urls, _normalize
+from .scraper import get_listing_products, _normalize
 from .monitor import task_manager
 from .discord import send_discord_new_event
 
@@ -23,6 +23,27 @@ logger = logging.getLogger(__name__)
 # (first seed, listing glitch, shop rebuild) and reseed WITHOUT auto-carting —
 # never mass-fire tasks.
 MAX_NEW_PER_SCAN = 8
+
+
+def _load_known(raw) -> dict:
+    """known_urls JSON -> {url: entity_id | None}. Accepts the legacy plain URL
+    list (IDs unknown -> next scan reseeds with IDs)."""
+    data = json.loads(raw or "{}")
+    if isinstance(data, list):
+        return {_normalize(u): None for u in data}
+    return {_normalize(u): i for u, i in data.items()}
+
+
+def _classify(known: dict, products: dict):
+    """-> (new, reappeared). New = unseen URL whose ID is above every ID seen so
+    far. Unseen URLs with an old or unknown ID are reappearances. No known IDs
+    yet -> nothing is new (seed)."""
+    max_id = max((i for i in known.values() if i), default=None)
+    unseen = [u for u in products if u not in known]
+    if max_id is None:
+        return [], []
+    new = sorted(u for u in unseen if products[u] is not None and products[u] > max_id)
+    return new, [u for u in unseen if u not in new]
 
 
 class ReleaseDetectorManager:
@@ -92,10 +113,11 @@ class ReleaseDetectorManager:
         if not cfg.active:
             raise StopAsyncIteration
         interval = max(3.0, cfg.poll_interval or 10.0)
-        known = {_normalize(u) for u in json.loads(cfg.known_urls or "[]")}
+        known = _load_known(cfg.known_urls)          # {url: entity_id | None}
+        max_id = max((i for i in known.values() if i), default=None)
 
         try:
-            urls = set(await get_listing_product_urls())
+            products = await get_listing_products()
         except Exception as e:
             # Partial/failed listing: skip the round entirely — never seed or
             # diff on an incomplete product set.
@@ -109,46 +131,57 @@ class ReleaseDetectorManager:
         cfg.last_scan_at = datetime.utcnow()
         cfg.error_message = None
 
+        # "New" is decided by entity ID, not by URL diff. Regiondo's product ID
+        # is a global, monotonically increasing counter: a real release always
+        # gets an ID above everything we've seen. Old products that drop out of
+        # the listing and come back (dated tours toggle with availability) keep
+        # their old, lower ID — those are absorbed silently: no task, no ping.
         acted = []
-        new = sorted(urls - known) if known else []
-        if not known:
-            # First scan after activation: seed only, never cart what exists.
-            logger.info(f"[Detector] seeded {len(urls)} existing products")
-        elif len(new) > MAX_NEW_PER_SCAN:
-            # Anomaly (listing glitch / shop rebuild): absorb via the union
-            # below, but don't fire tasks or pings.
-            logger.warning(f"[Detector] {len(new)} new URLs in one scan — absorbing without acting")
+        if max_id is None:
+            # First scan after activation (or legacy list without IDs): seed only.
+            logger.info(f"[Detector] seeded {len(products)} existing products (max id "
+                        f"{max((i for i in products.values() if i), default='?')})")
+        new, reappeared = _classify(known, products)
+        if reappeared:
+            logger.info(f"[Detector] {len(reappeared)} old product(s) reappeared, ignored")
+
+        if len(new) > MAX_NEW_PER_SCAN:
+            # Anomaly (shop rebuild / mass import): absorb, don't fire.
+            logger.warning(f"[Detector] {len(new)} new IDs in one scan — absorbing without acting")
             cfg.error_message = f"absorbed {len(new)} new at once (not carted)"
-        else:
-            # "+" joins AND-terms: "dortmund+ingolstadt" matches a URL containing
-            # BOTH. No terms (empty keyword) matches every new product.
-            terms = [t for t in (cfg.keyword or "").lower().replace(" ", "").split("+") if t]
-            for url in new:
-                lu = url.lower()
-                tid = None
-                if all(t in lu for t in terms):
-                    try:
-                        tid = await self._launch_task(url, cfg)
-                    except Exception as e:
-                        logger.error(f"[Detector] failed to launch {url}: {e}")
-                        cfg.error_message = f"launch failed for {url}: {e}"
-                # A found event always pings Discord; carted flag shows whether it
-                # matched the filter and a task started.
+            new = []
+
+        # "+" joins AND-terms: "dortmund+ingolstadt" matches a URL containing
+        # BOTH. No terms (empty keyword) matches every new product.
+        terms = [t for t in (cfg.keyword or "").lower().replace(" ", "").split("+") if t]
+        for url in new:
+            lu = url.lower()
+            tid = None
+            if all(t in lu for t in terms):
                 try:
-                    await send_discord_new_event(url, carted=tid is not None)
+                    tid = await self._launch_task(url, cfg)
                 except Exception as e:
-                    logger.warning(f"[Detector] discord ping failed: {e}")
-                if tid is not None:
-                    acted.append({"url": url, "at": datetime.utcnow().isoformat(), "task_id": tid})
+                    logger.error(f"[Detector] failed to launch {url}: {e}")
+                    cfg.error_message = f"launch failed for {url}: {e}"
+            # A genuinely new event always pings Discord; carted flag shows
+            # whether it matched the filter and a task started.
+            try:
+                await send_discord_new_event(url, carted=tid is not None)
+            except Exception as e:
+                logger.warning(f"[Detector] discord ping failed: {e}")
+            if tid is not None:
+                acted.append({"url": url, "at": datetime.utcnow().isoformat(), "task_id": tid})
 
         if acted:
             cfg.last_new_found_at = datetime.utcnow()
             log = json.loads(cfg.events_log or "[]")
             cfg.events_log = json.dumps((acted + log)[:20])
 
-        # UNION, never overwrite: once a URL is known it stays known, so a scrape
-        # that transiently misses products can't resurface them as "new".
-        cfg.known_urls = json.dumps(sorted(known | urls))
+        # Union, never shrink; keep the best-known ID per URL.
+        for u, i in products.items():
+            if known.get(u) is None:
+                known[u] = i
+        cfg.known_urls = json.dumps(known, sort_keys=True)
         db.commit()
         await self._broadcast(cfg, acted)
         return interval
