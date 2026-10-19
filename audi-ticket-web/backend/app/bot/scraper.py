@@ -317,9 +317,11 @@ async def get_bayern_games() -> List[Dict[str, Any]]:
 BASE_URL = "https://audidefuehrungen2.regiondo.de"
 
 
-async def get_listing_product_urls() -> List[str]:
-    """Light discovery for the release detector: every product URL on the shop
-    listing, with NO per-product detail fetch. Just the 3 `/kategorien` pages.
+async def get_listing_products() -> Dict[str, Optional[int]]:
+    """Light discovery for the release detector: every product on the shop
+    listing as {url: entity_id}, with NO per-product detail fetch. Just the
+    3 `/kategorien` pages. entity_id comes from the GTM dataLayer and is None
+    for a product only found via its anchor.
 
     Parses the GTM `productClick` dataLayer (`window.location='<product url>'`),
     which is emitted once per product tile and is precise (no nav links). Falls
@@ -368,21 +370,22 @@ async def get_listing_product_urls() -> List[str]:
             return False
         return not tail.startswith(NAV)
 
-    urls = set()
+    # GTM productClick block: {... 'id': '346010', ...} ... window.location='<url>'
+    pair_re = re.compile(
+        r"'id':\s*'(\d+)'.{0,400}?window\.location\s*=\s*'(" + re.escape(BASE_URL) + r"/[^']+)'",
+        re.S,
+    )
+    products: Dict[str, Optional[int]] = {}
     for html in htmls:
-        # Primary: GTM productClick handlers (one per tile).
-        for m in re.findall(
-            r"window\.location\s*=\s*'(" + re.escape(BASE_URL) + r"/[^']+)'", html
-        ):
+        for pid, m in pair_re.findall(html):
             if is_product(m):
-                urls.add(_normalize(m))
-        # Union with every product anchor on the page — the regex is lossy on its
-        # own, and an incomplete set makes old products look "new" to the detector.
+                products[_normalize(m)] = int(pid)
+        # Union with every product anchor — catches tiles whose dataLayer shape
+        # differs (they get id None, so the detector never auto-carts them).
         for link in BeautifulSoup(html, "html.parser").find_all("a", href=True):
             if is_product(link["href"]):
-                urls.add(_normalize(link["href"]))
-    return sorted(urls)
-
+                products.setdefault(_normalize(link["href"]), None)
+    return products
 
 def _normalize(u: str) -> str:
     """Canonical product URL: drop query/fragment and trailing slash, so the
