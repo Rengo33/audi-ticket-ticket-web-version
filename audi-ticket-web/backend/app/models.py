@@ -213,6 +213,11 @@ class ReleaseDetector(Base):
     # State (JSON-encoded lists)
     known_urls = Column(Text, default="[]")      # seen product URLs (seeded on first activation)
     events_log = Column(Text, default="[]")       # recent detections [{url, at, task_id}], capped
+    # Widget frontier scan: highest global product ID seen through the booking
+    # widget, and the wanted games already launched from it ({id: name}) so the
+    # listing path never starts a second task for the same product.
+    frontier_id = Column(Integer, nullable=True)
+    launched_ids = Column(Text, default="{}")
     scan_count = Column(Integer, default=0)
     last_scan_at = Column(DateTime, nullable=True)
     last_new_found_at = Column(DateTime, nullable=True)

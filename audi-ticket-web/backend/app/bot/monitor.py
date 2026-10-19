@@ -22,6 +22,9 @@ from .discord import send_discord_notification, send_discord_cart_success
 from .web_push import send_push
 
 logger = logging.getLogger(__name__)
+
+# How often a task for a not-yet-released product re-checks its public page.
+RELEASE_RECHECK_S = 30
 settings = get_settings()
 
 
@@ -535,6 +538,17 @@ class TaskManager:
                 await self._log(task_id, "info", f"Started monitoring: {product_url}", db)
 
                 event_id, ticket_id, categories = await bot.extract_event_details(product_url)
+
+                # Detector tasks for created-but-unreleased products point at
+                # /catalog/product/view/id/N, which redirects away until the
+                # product is publicly live. Wait for that instead of failing.
+                if (not event_id or not ticket_id) and "/catalog/product/view/id/" in product_url:
+                    await self._log(task_id, "info",
+                        f"Not released yet — checking every {RELEASE_RECHECK_S}s", db)
+                    while not event_id or not ticket_id:
+                        await asyncio.sleep(RELEASE_RECHECK_S)
+                        event_id, ticket_id, categories = await bot.extract_event_details(product_url)
+                    await self._log(task_id, "info", "Product is live", db)
 
                 if not event_id or not ticket_id:
                     await self._log(task_id, "error", "Could not extract Event/Ticket ID", db)

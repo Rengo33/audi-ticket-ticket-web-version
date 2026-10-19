@@ -2,7 +2,7 @@
 Release detector API — start/stop/configure the new-release auto-detector.
 """
 import json
-from typing import Optional, List, Any
+from typing import Optional, List, Any, Dict
 
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
@@ -43,6 +43,8 @@ class DetectorStatus(BaseModel):
     last_new_found_at: Optional[str]
     error_message: Optional[str]
     events_log: List[Any]
+    frontier_id: Optional[int]
+    launched: Dict[str, str]  # Audi products found via the widget {id: name}
 
 
 def _row(db: Session) -> ReleaseDetector:
@@ -72,6 +74,8 @@ def _status(cfg: ReleaseDetector) -> DetectorStatus:
         last_new_found_at=cfg.last_new_found_at.isoformat() if cfg.last_new_found_at else None,
         error_message=cfg.error_message,
         events_log=json.loads(cfg.events_log or "[]"),
+        frontier_id=cfg.frontier_id,
+        launched=json.loads(cfg.launched_ids or "{}"),
     )
 
 
