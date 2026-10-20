@@ -24,7 +24,7 @@ from .web_push import send_push
 logger = logging.getLogger(__name__)
 
 # How often a task for a not-yet-released product re-checks its public page.
-RELEASE_RECHECK_S = 30
+RELEASE_RECHECK_S = 10
 settings = get_settings()
 
 

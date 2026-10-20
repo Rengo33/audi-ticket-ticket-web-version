@@ -1,10 +1,12 @@
 """
-Release detector — watches the shop listing for newly-published products and
-auto-starts a monitoring task for each one (reusing the normal ATC/ACO path).
+Release detector — discovers new Audi products the moment they are CREATED
+(long before publication) and auto-starts a monitoring task for each one. The
+task itself waits for the product to go live and carts through the normal path.
 
-Discovery = diff the listing's product-URL set against what we've seen. New URL
-= new event. A keyword substring (default "fc-bayern") decides which new
-products to act on, so a new museum tour doesn't trigger a cart.
+Discovery = walk Regiondo's global product-ID counter through the booking
+widget, which answers for unpublished products too. A keyword (default
+"fc-bayern") on the product name decides which new products get a task, so a
+new museum tour doesn't trigger a cart.
 """
 import asyncio
 import json
@@ -14,43 +16,23 @@ from datetime import datetime
 
 from ..database import SessionLocal
 from ..models import Task, ReleaseDetector
-from .scraper import get_listing_products, _normalize, widget_lookup, product_view_url
+from .scraper import get_listing_products, widget_lookup, product_view_url
 from .monitor import task_manager
 from .discord import send_discord_new_event
 
 logger = logging.getLogger(__name__)
 
-# If a scan suddenly sees more new URLs than this, treat it as an anomaly
-# (first seed, listing glitch, shop rebuild) and reseed WITHOUT auto-carting —
-# never mass-fire tasks.
-MAX_NEW_PER_SCAN = 8
 # Widget frontier: max IDs walked per scan (catch-up after downtime spreads over
 # several scans), and how far past a 404 to look before deciding we're at the
 # end — a deleted product leaves a permanent 404 gap in the global counter.
 FRONTIER_STEP = 25
 FRONTIER_LOOKAHEAD = 2
+# Deleted products leave runs of 404s (seen up to 16 in a row). Every few scans,
+# while stuck at the frontier, probe further ahead; a hit means "gap", and the
+# next scan walks across it.
+GAP_PROBE_EVERY = 6
+GAP_PROBES = (5, 10, 20, 40)
 AUDI_VENDOR = "AUDI AG"  # exact: substring would hit e.g. "Via Claudia Augusta"
-
-
-def _load_known(raw) -> dict:
-    """known_urls JSON -> {url: entity_id | None}. Accepts the legacy plain URL
-    list (IDs unknown -> next scan reseeds with IDs)."""
-    data = json.loads(raw or "{}")
-    if isinstance(data, list):
-        return {_normalize(u): None for u in data}
-    return {_normalize(u): i for u, i in data.items()}
-
-
-def _classify(known: dict, products: dict):
-    """-> (new, reappeared). New = unseen URL whose ID is above every ID seen so
-    far. Unseen URLs with an old or unknown ID are reappearances. No known IDs
-    yet -> nothing is new (seed)."""
-    max_id = max((i for i in known.values() if i), default=None)
-    unseen = [u for u in products if u not in known]
-    if max_id is None:
-        return [], []
-    new = sorted(u for u in unseen if products[u] is not None and products[u] > max_id)
-    return new, [u for u in unseen if u not in new]
 
 
 def _slug(name: str) -> str:
@@ -71,6 +53,8 @@ def _matches(text: str, keyword: str) -> bool:
 class ReleaseDetectorManager:
     def __init__(self):
         self._task: asyncio.Task | None = None
+        self._gap_skip = 0   # extra misses tolerated next scan (set by a gap probe)
+        self._scans = 0
 
     def is_running(self) -> bool:
         return self._task is not None and not self._task.done()
@@ -135,64 +119,30 @@ class ReleaseDetectorManager:
         if not cfg.active:
             raise StopAsyncIteration
         interval = max(3.0, cfg.poll_interval or 10.0)
-        known = _load_known(cfg.known_urls)          # {url: entity_id | None}
-        max_id = max((i for i in known.values() if i), default=None)
 
-        try:
-            products = await get_listing_products()
-        except Exception as e:
-            # Partial/failed listing: skip the round entirely — never seed or
-            # diff on an incomplete product set.
-            cfg.error_message = f"scrape failed: {e}"
-            cfg.last_scan_at = datetime.utcnow()
-            db.commit()
-            await self._broadcast(cfg)
-            return interval
+        start_id = None
+        if cfg.frontier_id is None:
+            # First activation only: start walking from the newest listed
+            # product, so existing products never trigger.
+            try:
+                start_id = max((i for i in (await get_listing_products()).values() if i), default=None)
+            except Exception as e:
+                cfg.error_message = f"seed failed: {e}"
+                cfg.last_scan_at = datetime.utcnow()
+                db.commit()
+                await self._broadcast(cfg)
+                return interval
+            logger.info(f"[Detector] seeded frontier at {start_id}")
 
         cfg.scan_count = (cfg.scan_count or 0) + 1
         cfg.last_scan_at = datetime.utcnow()
         cfg.error_message = None
 
-        # "New" is decided by entity ID, not by URL diff. Regiondo's product ID
-        # is a global, monotonically increasing counter: a real release always
-        # gets an ID above everything we've seen. Old products that drop out of
-        # the listing and come back (dated tours toggle with availability) keep
-        # their old, lower ID — those are absorbed silently: no task, no ping.
-        acted = []
-        if max_id is None:
-            # First scan after activation (or legacy list without IDs): seed only.
-            logger.info(f"[Detector] seeded {len(products)} existing products (max id "
-                        f"{max((i for i in products.values() if i), default='?')})")
-        new, reappeared = _classify(known, products)
-        if reappeared:
-            logger.info(f"[Detector] {len(reappeared)} old product(s) reappeared, ignored")
-
-        if len(new) > MAX_NEW_PER_SCAN:
-            # Anomaly (shop rebuild / mass import): absorb, don't fire.
-            logger.warning(f"[Detector] {len(new)} new IDs in one scan — absorbing without acting")
-            cfg.error_message = f"absorbed {len(new)} new at once (not carted)"
-            new = []
-
-        launched = json.loads(cfg.launched_ids or "{}")
-        for url in new:
-            if str(products[url]) in launched:
-                continue  # already started from the widget before it went live
-            tid = await self._act(url, cfg, matched=_matches(url, cfg.keyword))
-            if tid is not None:
-                acted.append({"url": url, "at": datetime.utcnow().isoformat(), "task_id": tid})
-
-        acted += await self._scan_frontier(cfg, max_id or max((i for i in products.values() if i), default=None))
-
+        acted = await self._scan_frontier(cfg, start_id)
         if acted:
             cfg.last_new_found_at = datetime.utcnow()
             log = json.loads(cfg.events_log or "[]")
             cfg.events_log = json.dumps((acted + log)[:20])
-
-        # Union, never shrink; keep the best-known ID per URL.
-        for u, i in products.items():
-            if known.get(u) is None:
-                known[u] = i
-        cfg.known_urls = json.dumps(known, sort_keys=True)
         db.commit()
         await self._broadcast(cfg, acted)
         return interval
@@ -222,9 +172,11 @@ class ReleaseDetectorManager:
         if fid is None:
             return []
         launched = json.loads(cfg.launched_ids or "{}")
-        acted, pid, misses = [], fid + 1, 0
+        acted, pid, misses, start = [], fid + 1, 0, fid
+        allowed = FRONTIER_LOOKAHEAD + self._gap_skip
+        self._scans += 1
         try:
-            while pid <= fid + FRONTIER_STEP and misses <= FRONTIER_LOOKAHEAD:
+            while pid <= start + max(FRONTIER_STEP, allowed + 5) and misses <= allowed:
                 res = await widget_lookup(pid)
                 if res is None:
                     misses += 1
@@ -241,6 +193,14 @@ class ReleaseDetectorManager:
                             acted.append({"url": url, "name": name,
                                           "at": datetime.utcnow().isoformat(), "task_id": tid})
                 pid += 1
+            if fid > start:
+                self._gap_skip = 0
+            elif self._scans % GAP_PROBE_EVERY == 0:
+                for off in GAP_PROBES:
+                    if await widget_lookup(fid + off) is not None:
+                        logger.info(f"[Detector] ID gap after {fid}, crossing up to +{off}")
+                        self._gap_skip = off
+                        break
         except Exception as e:
             # Keep progress so far; retry the rest next scan.
             logger.warning(f"[Detector] frontier scan stopped at {pid}: {e}")
