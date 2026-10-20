@@ -545,9 +545,20 @@ class TaskManager:
                 if (not event_id or not ticket_id) and "/catalog/product/view/id/" in product_url:
                     await self._log(task_id, "info",
                         f"Not released yet — checking every {RELEASE_RECHECK_S}s", db)
+                    checks = 0
                     while not event_id or not ticket_id:
                         await asyncio.sleep(RELEASE_RECHECK_S)
                         event_id, ticket_id, categories = await bot.extract_event_details(product_url)
+                        # Count release checks as scans so the UI shows the task is alive.
+                        checks += 1
+                        now = datetime.utcnow()
+                        task = db.query(Task).filter(Task.id == task_id).first()
+                        if task:
+                            task.scan_count, task.last_scan_at = checks, now
+                            db.commit()
+                        await self.broadcast({"type": "scan_update", "data": {
+                            "task_id": task_id, "scan_count": checks,
+                            "tickets_available": 0, "last_scan_at": now.isoformat()}})
                     await self._log(task_id, "info", "Product is live", db)
 
                 if not event_id or not ticket_id:
