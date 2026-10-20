@@ -259,7 +259,7 @@ class ReleaseDetectorManager:
                 "scan_count": cfg.scan_count,
                 "last_scan_at": cfg.last_scan_at.isoformat() if cfg.last_scan_at else None,
                 "last_new_found_at": cfg.last_new_found_at.isoformat() if cfg.last_new_found_at else None,
-                "known_count": len(json.loads(cfg.known_urls or "[]")),
+                "frontier_id": cfg.frontier_id,
                 "error": cfg.error_message,
                 "new": acted or [],
             },

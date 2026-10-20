@@ -38,7 +38,6 @@ class DetectorStatus(BaseModel):
     auto_checkout: bool
     billing_profile_id: Optional[str]
     scan_count: int
-    known_count: int
     last_scan_at: Optional[str]
     last_new_found_at: Optional[str]
     error_message: Optional[str]
@@ -69,7 +68,6 @@ def _status(cfg: ReleaseDetector) -> DetectorStatus:
         auto_checkout=bool(cfg.auto_checkout),
         billing_profile_id=str(cfg.billing_profile_id) if cfg.billing_profile_id is not None else None,
         scan_count=cfg.scan_count or 0,
-        known_count=len(json.loads(cfg.known_urls or "[]")),
         last_scan_at=cfg.last_scan_at.isoformat() if cfg.last_scan_at else None,
         last_new_found_at=cfg.last_new_found_at.isoformat() if cfg.last_new_found_at else None,
         error_message=cfg.error_message,
@@ -99,7 +97,7 @@ async def start_detector(
     cfg.auto_checkout = data.auto_checkout
     cfg.billing_profile_id = data.billing_profile_id
     if data.reseed:
-        cfg.known_urls = "[]"
+        cfg.frontier_id = None  # next scan re-seeds from the newest listed product
         cfg.scan_count = 0
     db.commit()
     await release_detector.start(db)
