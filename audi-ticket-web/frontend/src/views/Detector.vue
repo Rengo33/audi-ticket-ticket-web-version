@@ -16,9 +16,9 @@
     </div>
 
     <p class="lede">
-      Polls the shop listing every few seconds, diffs product URLs, and auto-starts a
-      cart task for each <em>new</em> product whose URL contains the keyword.
-      First scan after Start only seeds the baseline — it never carts what already exists.
+      Watches new product IDs as soon as Audi creates them (before release). A matching
+      game gets its task immediately; the task carts the moment the game goes live.
+      First scan after Start only seeds the baseline.
     </p>
 
     <!-- status -->
@@ -29,7 +29,7 @@
       </div>
       <dl class="stat-grid">
         <div><dt>Scans</dt><dd class="mono">{{ status.scan_count }}</dd></div>
-        <div><dt>Known products</dt><dd class="mono">{{ status.known_count }}</dd></div>
+        <div><dt>Highest ID</dt><dd class="mono">{{ status.frontier_id || '—' }}</dd></div>
         <div><dt>Last scan</dt><dd class="mono">{{ fmt(status.last_scan_at) }}</dd></div>
         <div><dt>Last new found</dt><dd class="mono">{{ fmt(status.last_new_found_at) }}</dd></div>
       </dl>
@@ -74,6 +74,18 @@
       <p class="hint">Changes apply when you press Start. Start while running to re-apply config.</p>
     </div>
 
+    <!-- Audi products found before release (booking-widget scan) -->
+    <div class="card">
+      <h3 class="card-title">Audi products seen before release</h3>
+      <div v-if="!status.launched || Object.keys(status.launched).length === 0" class="muted">None yet.</div>
+      <ul v-else class="events">
+        <li v-for="(name, id) in status.launched" :key="id">
+          <span class="mono time">#{{ id }}</span>
+          <span>{{ name }}</span>
+        </li>
+      </ul>
+    </div>
+
     <!-- recent detections -->
     <div class="card">
       <h3 class="card-title">Recent detections</h3>
@@ -81,7 +93,7 @@
       <ul v-else class="events">
         <li v-for="(e, i) in status.events_log" :key="i">
           <span class="mono time">{{ fmt(e.at) }}</span>
-          <a :href="e.url" target="_blank" rel="noopener">{{ shortUrl(e.url) }}</a>
+          <a :href="e.url" target="_blank" rel="noopener">{{ e.name || shortUrl(e.url) }}</a>
           <span v-if="e.task_id" class="tag">task #{{ e.task_id }}</span>
         </li>
       </ul>
@@ -93,7 +105,7 @@
 import { ref, reactive, onMounted, onUnmounted } from 'vue'
 import { api } from '../stores/api'
 
-const status = ref({ running: false, active: false, scan_count: 0, known_count: 0, events_log: [] })
+const status = ref({ running: false, active: false, scan_count: 0, events_log: [], frontier_id: null, launched: {} })
 const profiles = ref([])
 const busy = ref(false)
 let timer = null

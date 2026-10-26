@@ -189,9 +189,9 @@ class PushSubscription(Base):
 class ReleaseDetector(Base):
     """Single-row config + state for the new-release auto-detector.
 
-    Polls the shop listing, diffs product URLs against `known_urls`, and when a
-    new one appears it auto-creates and starts a monitoring Task (reusing the
-    normal ATC/ACO path). Always id=1.
+    Walks the global product-ID counter (`frontier_id`) through the booking
+    widget, and when a new matching Audi product appears it auto-creates and
+    starts a monitoring Task (reusing the normal ATC/ACO path). Always id=1.
     """
     __tablename__ = "release_detector"
 
@@ -211,8 +211,13 @@ class ReleaseDetector(Base):
     billing_profile_id = Column(String(100), nullable=True)
 
     # State (JSON-encoded lists)
-    known_urls = Column(Text, default="[]")      # seen product URLs (seeded on first activation)
+    known_urls = Column(Text, default="[]")      # unused since the widget-only detector
     events_log = Column(Text, default="[]")       # recent detections [{url, at, task_id}], capped
+    # Widget frontier scan: highest global product ID seen through the booking
+    # widget, and the wanted games already launched from it ({id: name}) so the
+    # listing path never starts a second task for the same product.
+    frontier_id = Column(Integer, nullable=True)
+    launched_ids = Column(Text, default="{}")
     scan_count = Column(Integer, default=0)
     last_scan_at = Column(DateTime, nullable=True)
     last_new_found_at = Column(DateTime, nullable=True)

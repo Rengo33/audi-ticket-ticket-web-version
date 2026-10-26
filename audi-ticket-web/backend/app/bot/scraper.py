@@ -7,7 +7,7 @@ import re
 import json
 import logging
 from datetime import datetime, date
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 from dataclasses import dataclass, asdict
 
 from curl_cffi.requests import AsyncSession
@@ -386,6 +386,42 @@ async def get_listing_products() -> Dict[str, Optional[int]]:
             if is_product(link["href"]):
                 products.setdefault(_normalize(link["href"]), None)
     return products
+
+WIDGET_URL = BASE_URL + "/bookingwidget/vendor/30797/id/{}"
+_WIDGET_TITLE = re.compile(r"<title>\s*(.*?)\s*bei Regiondo", re.S)
+_WIDGET_BRAND = re.compile(r"'brand':\s*'([^']*)'")
+# Cloudflare challenges this route from the server IP. safari17_2_ios is the
+# only impersonation target that reliably gets through (chrome* ~0-25%), and a
+# long-lived session keeps __cf_bm + the connection, cutting 403s further.
+# Extra headers (Accept-Language, Referer) break the fingerprint — don't add any.
+_widget_session: Optional[AsyncSession] = None
+
+
+async def widget_lookup(pid: int) -> Optional[Tuple[str, str]]:
+    """Resolve a global Regiondo product ID to (vendor, name) through the
+    booking-widget route. Answers for every created product, published or not,
+    so a new Audi game is identifiable as soon as Audi creates it.
+    None = ID not created yet (404). Raises on any other failure so the caller
+    never mistakes an error for the end of the ID range."""
+    global _widget_session
+    if _widget_session is None:
+        _widget_session = AsyncSession(impersonate="safari17_2_ios", timeout=15)
+    r = await _widget_session.get(WIDGET_URL.format(pid))
+    if r.status_code == 404:
+        return None
+    if r.status_code != 200:
+        if r.status_code == 403:  # challenged: start clean next time
+            await _widget_session.close()
+            _widget_session = None
+        raise RuntimeError(f"widget id {pid} returned {r.status_code}")
+    t, b = _WIDGET_TITLE.search(r.text), _WIDGET_BRAND.search(r.text)
+    return (b.group(1) if b else "", t.group(1) if t else "")
+
+
+def product_view_url(pid: int) -> str:
+    """Public product page by ID: 301 to /kategorien while hidden, 200 once live."""
+    return f"{BASE_URL}/catalog/product/view/id/{pid}"
+
 
 def _normalize(u: str) -> str:
     """Canonical product URL: drop query/fragment and trailing slash, so the
