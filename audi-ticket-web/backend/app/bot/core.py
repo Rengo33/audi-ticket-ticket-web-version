@@ -62,7 +62,16 @@ class AudiTicketBot:
         if self.session:
             await self.session.close()
             self.session = None
-    
+
+    async def _recycle_if_blocked(self, response):
+        """Cloudflare keeps challenging a session once it has flagged it, while a
+        fresh session usually passes. Without this, a long-lived poller stays
+        blind (403 forever) and misses the release."""
+        if response.status_code == 403:
+            logger.warning("Cloudflare 403 — starting a fresh session")
+            await self.close_session()
+            await self.start_session()
+
     async def extract_event_details(self, product_url: str) -> Tuple[Optional[str], Optional[str], list]:
         """
         Extract Event ID, Ticket ID, and price category names from product page.
@@ -81,6 +90,7 @@ class AudiTicketBot:
 
             if response.status_code != 200:
                 logger.error(f"Status {response.status_code} fetching product page")
+                await self._recycle_if_blocked(response)
                 return None, None, []
 
             soup = BeautifulSoup(response.text, 'html.parser')
@@ -152,6 +162,7 @@ class AudiTicketBot:
                     logger.warning(f"[Availability] Could not parse response - pattern not found")
             else:
                 logger.warning(f"[Availability] Non-200 status: {response.status_code}")
+                await self._recycle_if_blocked(response)
                     
         except Exception as e:
             logger.error(f"[Availability] Error: {e}")
