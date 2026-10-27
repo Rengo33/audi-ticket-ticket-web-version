@@ -6,10 +6,21 @@
         <div class="eyebrow">MONITORING</div>
         <h1 class="view-title">Tasks</h1>
       </div>
-      <button @click="showModal = true" class="btn btn-primary">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-        <span>New task</span>
-      </button>
+      <div class="head-actions">
+        <!-- Shop route: Cloudflare (default) or straight to origin while CF blocks us -->
+        <div class="shop-mode">
+          <span :class="{ on: !shopViaOrigin }">Cloudflare</span>
+          <label class="switch" :class="{ busy: shopBusy }">
+            <input type="checkbox" :checked="shopViaOrigin" :disabled="shopBusy" @change="toggleShopMode($event.target.checked)" />
+            <span class="track"></span>
+          </label>
+          <span :class="{ on: shopViaOrigin }">Bypass</span>
+        </div>
+        <button @click="showModal = true" class="btn btn-primary" aria-label="New task">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+          <span>New task</span>
+        </button>
+      </div>
     </div>
 
     <!-- Scheduled -->
@@ -122,16 +133,6 @@
         </article>
       </div>
     </section>
-
-    <!-- Shop route: Cloudflare (default) or straight to origin while CF blocks us -->
-    <div class="shop-mode">
-      <span :class="{ on: !shopViaOrigin }">Cloudflare</span>
-      <label class="switch" :class="{ busy: shopBusy }">
-        <input type="checkbox" :checked="shopViaOrigin" :disabled="shopBusy" @change="toggleShopMode($event.target.checked)" />
-        <span class="track"></span>
-      </label>
-      <span :class="{ on: shopViaOrigin }">Bypass</span>
-    </div>
 
     <!-- Create Modal -->
     <!-- Teleport to body so the overlay escapes .stage's overflow:auto.
@@ -297,9 +298,12 @@ onMounted(() => {
 
 <style scoped>
 .shop-mode {
-  display: flex; align-items: center; justify-content: center; gap: 0.6rem;
-  margin-top: 2rem; font-size: 0.75rem; color: var(--ink-3);
+  display: flex; align-items: center; gap: 0.5rem;
+  font-size: 0.75rem; color: var(--ink-3);
 }
+.head-actions { display: flex; align-items: center; gap: 1rem; }
+/* Phone width: icon-only button so title, switch and button share one row. */
+@media (max-width: 480px) { .head-actions .btn span { display: none; } }
 .shop-mode .on { color: var(--ink); font-weight: 600; }
 .switch { position: relative; display: inline-flex; flex-shrink: 0; cursor: pointer; }
 .switch.busy { opacity: 0.5; cursor: wait; }
