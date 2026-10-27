@@ -33,8 +33,8 @@ router = APIRouter(tags=["checkout"])
 
 # ─── Cart session cache ──────────────────────────────────────────────
 # One AsyncSession per cart token so cookies stick across proxy hops.
-# Entries self-evict when their cart expires or is unreachable, and are rebuilt
-# when the shop route they were pinned to (via_origin) no longer matches.
+# Entries self-evict when their cart expires or is unreachable. Each remembers
+# its shop route (via_origin) so _proxy_send can swap it after a 403.
 _proxy_sessions: Dict[str, Tuple[AsyncSession, datetime, bool]] = {}
 
 
@@ -48,17 +48,33 @@ async def _evict_session(token: str) -> None:
             pass
 
 
-async def _get_proxy_session(cart: CartSession) -> AsyncSession:
+async def _new_proxy_session(cart: CartSession, via_origin: bool) -> AsyncSession:
+    session = AsyncSession(impersonate="safari17_2_ios", curl_options=shop_curl_options(via_origin))
+    session.cookies.set(cart.cookie_name, cart.cookie_value, domain=cart.cookie_domain)
+    _proxy_sessions[cart.token] = (session, cart.expires_at, via_origin)
+    return session
+
+
+async def _proxy_send(cart: CartSession, method: str, url: str, **kwargs):
+    """Send through the cart's cached session, starting on the current shop
+    route. A cart stays usable only on the route that accepts its cookie:
+    Cloudflare challenges (403) a cart carted via Bypass even after the switch
+    is back on Cloudflare. So on a 403 the session moves to the other route for
+    good and the request is retried once (a challenged request never reached
+    the shop, so retrying a POST is safe)."""
     entry = _proxy_sessions.get(cart.token)
-    if entry and entry[2] != shop_via_origin_enabled():
+    if entry:
+        session, _, via_origin = entry
+    else:
+        via_origin = shop_via_origin_enabled()
+        session = await _new_proxy_session(cart, via_origin)
+    response = await session.request(method, url, **kwargs)
+    if response.status_code == 403:
+        logger.warning(f"[Proxy] 403 via {'origin' if via_origin else 'Cloudflare'}, switching route")
         await _evict_session(cart.token)
-        entry = None
-    if entry is None:
-        session = AsyncSession(impersonate="safari17_2_ios", curl_options=shop_curl_options())
-        session.cookies.set(cart.cookie_name, cart.cookie_value, domain=cart.cookie_domain)
-        _proxy_sessions[cart.token] = (session, cart.expires_at, shop_via_origin_enabled())
-        return session
-    return entry[0]
+        session = await _new_proxy_session(cart, not via_origin)
+        response = await session.request(method, url, **kwargs)
+    return response
 
 
 async def _require_cart(token: str, db: Session) -> CartSession:
@@ -215,9 +231,8 @@ async def checkout_cart_page(token: str, db: Session = Depends(get_db)):
         cart.used_at = datetime.utcnow()
         db.commit()
 
-    session = await _get_proxy_session(cart)
     try:
-        response = await session.get(f"{settings.audi_base_url}/checkout/cart")
+        response = await _proxy_send(cart, "GET", f"{settings.audi_base_url}/checkout/cart")
     except Exception as e:
         raise HTTPException(502, f"Proxy error: {e}")
 
@@ -235,14 +250,13 @@ async def checkout_proxy_get(
     db: Session = Depends(get_db),
 ):
     cart = await _require_cart(token, db)
-    session = await _get_proxy_session(cart)
 
     target = f"{settings.audi_base_url}/{path}"
     if request.query_params:
         target += f"?{request.query_params}"
 
     try:
-        response = await session.get(target)
+        response = await _proxy_send(cart, "GET", target)
     except Exception as e:
         raise HTTPException(502, f"Proxy error: {e}")
 
@@ -263,7 +277,6 @@ async def checkout_proxy_post(
     db: Session = Depends(get_db),
 ):
     cart = await _require_cart(token, db)
-    session = await _get_proxy_session(cart)
 
     body = await request.body()
     ctype = request.headers.get("content-type", "")
@@ -271,7 +284,7 @@ async def checkout_proxy_post(
     data = body.decode("utf-8") if "application/x-www-form-urlencoded" in ctype else body
 
     try:
-        response = await session.post(f"{settings.audi_base_url}/{path}", data=data, headers=headers)
+        response = await _proxy_send(cart, "POST", f"{settings.audi_base_url}/{path}", data=data, headers=headers)
     except Exception as e:
         raise HTTPException(502, f"Proxy error: {e}")
 

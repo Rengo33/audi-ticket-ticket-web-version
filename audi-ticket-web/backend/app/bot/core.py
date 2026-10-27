@@ -56,12 +56,12 @@ def set_shop_via_origin(enabled: bool):
     _shop_via_origin = enabled
 
 
-def shop_curl_options() -> dict:
+def shop_curl_options(via_origin: Optional[bool] = None) -> dict:
     """Pin the shop host to its origin IPs so shop traffic skips Cloudflare.
     Cloudflare hard-blocks the server IP for hours at a time ("Sorry, you have
     been blocked") while the origins answer the same routes with 200. Empty
     dict when disabled, so it can be passed to every session unconditionally."""
-    if not shop_via_origin_enabled():
+    if not (shop_via_origin_enabled() if via_origin is None else via_origin):
         return {}
     return {CurlOpt.RESOLVE: [f"{get_settings().audi_host}:443:{ip}" for ip in shop_origin_ips()]}
 
