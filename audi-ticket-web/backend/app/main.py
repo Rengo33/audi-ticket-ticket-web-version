@@ -12,7 +12,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .config import get_settings
 from .database import init_db, SessionLocal
-from .api import auth, tasks, checkout, websocket, games, billing, push, detector
+from .api import auth, tasks, checkout, websocket, games, billing, push, detector, settings as settings_api
 from .bot.monitor import task_manager
 from .bot.release_detector import release_detector
 from .bot import web_push
@@ -134,6 +134,7 @@ app.include_router(games.router, prefix="/api")
 app.include_router(billing.router, prefix="/api")
 app.include_router(push.router, prefix="/api")
 app.include_router(detector.router, prefix="/api")
+app.include_router(settings_api.router, prefix="/api")
 app.include_router(checkout.router)
 app.include_router(websocket.router)
 

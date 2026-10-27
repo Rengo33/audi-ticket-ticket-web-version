@@ -222,3 +222,14 @@ class ReleaseDetector(Base):
     last_scan_at = Column(DateTime, nullable=True)
     last_new_found_at = Column(DateTime, nullable=True)
     error_message = Column(Text, nullable=True)
+
+
+class AppSettings(Base):
+    """Single-row (id=1) runtime settings that the UI can flip without a
+    restart. The shop can be reached either through Cloudflare (safe default)
+    or straight to the origin IPs when Cloudflare hard-blocks the server IP.
+    The env var `shop_via_origin` only seeds the initial value."""
+    __tablename__ = "app_settings"
+
+    id = Column(Integer, primary_key=True, default=1)
+    shop_via_origin = Column(Boolean, default=False)

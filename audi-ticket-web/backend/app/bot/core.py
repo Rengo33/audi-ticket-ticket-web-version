@@ -42,12 +42,33 @@ def shop_origin_ips() -> list:
     return [ip.strip() for ip in get_settings().shop_origin_ips.split(",") if ip.strip()]
 
 
+def shop_via_origin_enabled() -> bool:
+    """Live on/off for the origin-IP route, from the app_settings row so the UI
+    can flip it without a restart. Env `shop_via_origin` is only the seed for a
+    brand-new row. Falls back to the env value if the DB isn't reachable.
+    ponytail: one indexed single-row read per session creation, not per request."""
+    from ..database import SessionLocal
+    from ..models import AppSettings
+    try:
+        db = SessionLocal()
+        try:
+            row = db.query(AppSettings).filter(AppSettings.id == 1).first()
+            if row is None:
+                row = AppSettings(id=1, shop_via_origin=get_settings().shop_via_origin)
+                db.add(row); db.commit()
+            return bool(row.shop_via_origin)
+        finally:
+            db.close()
+    except Exception:
+        return get_settings().shop_via_origin
+
+
 def shop_curl_options() -> dict:
     """Pin the shop host to its origin IPs so shop traffic skips Cloudflare.
     Cloudflare hard-blocks the server IP for hours at a time ("Sorry, you have
     been blocked") while the origins answer the same routes with 200. Empty
     dict when disabled, so it can be passed to every session unconditionally."""
-    if not get_settings().shop_via_origin:
+    if not shop_via_origin_enabled():
         return {}
     return {CurlOpt.RESOLVE: [f"{get_settings().audi_host}:443:{ip}" for ip in shop_origin_ips()]}
 

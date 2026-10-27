@@ -26,7 +26,7 @@ from curl_cffi.requests import AsyncSession
 from ..config import get_settings
 from ..crypto import decrypt
 from ..models import BillingProfile
-from .core import shop_curl_options, shop_origin_ips
+from .core import shop_curl_options, shop_origin_ips, shop_via_origin_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -145,7 +145,7 @@ class CheckoutResult:
 def _resolver_arg() -> list:
     """Chromium equivalent of the curl RESOLVE pin — the payment page has to
     reach the same origin the cart session talks to, or Cloudflare 403s it."""
-    ips = shop_origin_ips() if get_settings().shop_via_origin else []
+    ips = shop_origin_ips() if shop_via_origin_enabled() else []
     return [f"--host-resolver-rules=MAP {get_settings().audi_host} {ips[0]}"] if ips else []
 
 

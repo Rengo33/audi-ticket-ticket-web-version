@@ -12,6 +12,19 @@
       </button>
     </div>
 
+    <!-- Shop connection mode -->
+    <div class="shop-mode">
+      <div class="shop-mode-text">
+        <span class="eyebrow">Shop connection</span>
+        <strong>{{ shopViaOrigin ? 'Direct to origin (bypasses Cloudflare)' : 'Via Cloudflare (default)' }}</strong>
+        <small>Switch to direct only while Cloudflare is blocking the server IP.</small>
+      </div>
+      <label class="switch" :class="{ busy: shopBusy }">
+        <input type="checkbox" :checked="shopViaOrigin" :disabled="shopBusy" @change="toggleShopMode($event.target.checked)" />
+        <span class="track"></span>
+      </label>
+    </div>
+
     <!-- Scheduled -->
     <section v-if="scheduledTasks.length > 0" class="section">
       <div class="section-head">
@@ -263,14 +276,52 @@ const fetchBillingProfiles = async () => {
   try { billingProfiles.value = await api.get('/api/billing/profiles'); } catch { /* ignore */ }
 };
 
+const shopViaOrigin = ref(false);
+const shopBusy = ref(false);
+const fetchShopMode = async () => {
+  try { shopViaOrigin.value = (await api.get('/api/settings')).shop_via_origin; } catch { /* ignore */ }
+};
+const toggleShopMode = async (enabled) => {
+  shopBusy.value = true;
+  try {
+    shopViaOrigin.value = (await api.put('/api/settings', { shop_via_origin: enabled })).shop_via_origin;
+  } catch {
+    await fetchShopMode();  // revert the checkbox to the real state on failure
+  } finally { shopBusy.value = false; }
+};
+
 onMounted(() => {
   if (taskStore.tasks.length === 0) taskStore.fetchTasks();
   fetchScheduled();
   fetchBillingProfiles();
+  fetchShopMode();
 });
 </script>
 
 <style scoped>
+.shop-mode {
+  display: flex; align-items: center; justify-content: space-between; gap: 1rem;
+  background: var(--surface); border: 1px solid var(--line);
+  border-radius: var(--radius-lg); padding: 0.85rem 1rem; margin-bottom: 1.5rem;
+}
+.shop-mode-text { display: flex; flex-direction: column; gap: 2px; }
+.shop-mode-text strong { font-size: 0.875rem; font-weight: 600; letter-spacing: -0.01em; }
+.shop-mode-text small { color: var(--ink-3); font-size: 0.75rem; }
+.switch { position: relative; display: inline-flex; flex-shrink: 0; cursor: pointer; }
+.switch.busy { opacity: 0.5; cursor: wait; }
+.switch input { position: absolute; opacity: 0; width: 0; height: 0; }
+.switch .track {
+  width: 42px; height: 24px; border-radius: 999px;
+  background: var(--ink-4); transition: background 0.15s;
+}
+.switch .track::after {
+  content: ''; position: absolute; top: 3px; left: 3px;
+  width: 18px; height: 18px; border-radius: 50%; background: #fff;
+  transition: transform 0.15s;
+}
+.switch input:checked + .track { background: var(--ok); }
+.switch input:checked + .track::after { transform: translateX(18px); }
+
 .view-head {
   display: flex; align-items: flex-end; justify-content: space-between;
   gap: 1rem;
