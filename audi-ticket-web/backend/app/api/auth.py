@@ -4,7 +4,7 @@ Authentication endpoints.
 from fastapi import APIRouter, Response
 
 from ..schemas import LoginRequest, LoginResponse
-from ..auth import verify_password, create_session_token, invalidate_token
+from ..auth import verify_password, create_session_token
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 

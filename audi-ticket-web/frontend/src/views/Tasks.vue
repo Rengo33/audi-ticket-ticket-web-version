@@ -108,6 +108,7 @@
             <button
               v-if="!['running','success','waiting'].includes(task.status)"
               @click="taskStore.startTask(task.id)"
+              :disabled="task.pending"
               class="icon-btn is-ok"
               title="Start"
             >
@@ -116,6 +117,7 @@
             <button
               v-if="['running','success','waiting'].includes(task.status)"
               @click="taskStore.stopTask(task.id)"
+              :disabled="task.pending"
               class="icon-btn is-danger"
               title="Stop"
             >
@@ -124,6 +126,7 @@
             <button
               v-if="!['running','success','waiting'].includes(task.status)"
               @click="taskStore.deleteTask(task.id)"
+              :disabled="task.pending"
               class="icon-btn is-danger"
               title="Delete"
             >
