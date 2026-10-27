@@ -1,8 +1,8 @@
-from datetime import datetime, timedelta
 from typing import Optional
 import hashlib
 import hmac
 import secrets
+import time
 
 from fastapi import HTTPException, Security, Depends, Request, status
 from fastapi.security import APIKeyHeader
@@ -11,15 +11,9 @@ from .config import get_settings
 
 settings = get_settings()
 
-# Simple token storage (in production, use Redis or DB)
-active_tokens: dict[str, datetime] = {}
-
 api_key_header = APIKeyHeader(name="X-Auth-Token", auto_error=False)
 
-
-def generate_token() -> str:
-    """Generate a secure random token."""
-    return secrets.token_urlsafe(32)
+TOKEN_TTL_S = 30 * 86400  # 30 days, for mobile app persistence
 
 
 def hash_password(password: str) -> str:
@@ -32,30 +26,28 @@ def verify_password(password: str) -> bool:
     return hmac.compare_digest(password.encode(), settings.app_password.encode())
 
 
+def _sign(payload: str) -> str:
+    # Keyed on the app password too, so changing it logs every session out.
+    key = f"{settings.secret_key}:{settings.app_password}".encode()
+    return hmac.new(key, payload.encode(), hashlib.sha256).hexdigest()
+
+
 def create_session_token() -> str:
-    """Create a new session token valid for 30 days (for mobile app persistence)."""
-    token = generate_token()
-    active_tokens[token] = datetime.utcnow() + timedelta(days=30)
-    return token
+    """Signed, stateless token `nonce.expiry.signature`. Nothing is stored, so
+    sessions (and the WebSocket) survive backend restarts and deploys."""
+    payload = f"{secrets.token_urlsafe(16)}.{int(time.time()) + TOKEN_TTL_S}"
+    return f"{payload}.{_sign(payload)}"
 
 
 def validate_token(token: str) -> bool:
-    """Check if token is valid and not expired."""
-    if token not in active_tokens:
+    """Check signature and expiry."""
+    payload, _, sig = token.rpartition(".")
+    if not payload or not hmac.compare_digest(sig.encode(), _sign(payload).encode()):
         return False
-    
-    if datetime.utcnow() > active_tokens[token]:
-        # Token expired, remove it
-        del active_tokens[token]
+    try:
+        return int(payload.rsplit(".", 1)[-1]) > time.time()
+    except ValueError:
         return False
-    
-    return True
-
-
-def invalidate_token(token: str) -> None:
-    """Remove a token (logout)."""
-    if token in active_tokens:
-        del active_tokens[token]
 
 
 async def get_current_user(
@@ -80,12 +72,3 @@ async def get_current_user(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Invalid or missing authentication token"
     )
-
-
-def cleanup_expired_tokens() -> int:
-    """Remove expired tokens. Returns count of removed tokens."""
-    now = datetime.utcnow()
-    expired = [t for t, exp in active_tokens.items() if now > exp]
-    for token in expired:
-        del active_tokens[token]
-    return len(expired)

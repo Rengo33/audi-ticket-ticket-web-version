@@ -54,6 +54,9 @@ async def websocket_endpoint(websocket: WebSocket):
     token = websocket.query_params.get("token")
     
     if not token or not validate_token(token):
+        # Accept first: a close before accept is an HTTP 403 that the browser
+        # reports as 1006, so the client would keep retrying a dead token.
+        await websocket.accept()
         await websocket.close(code=4001, reason="Unauthorized")
         return
     

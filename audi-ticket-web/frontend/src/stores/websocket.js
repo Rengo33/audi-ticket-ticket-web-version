@@ -9,6 +9,7 @@ let reconnectTimer = null
 let getTokenFn = null
 let failCount = 0
 let pingInterval = null
+let everOpened = false  // resync only on REconnects; App does the first fetch
 const MAX_RECONNECTS = 12
 const MAX_BACKOFF_MS = 30000
 
@@ -16,6 +17,20 @@ function getWsUrl(token) {
   const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
   return `${proto}//${window.location.host}/ws?token=${token}`
 }
+
+// iOS drops the socket while the app is in the background and the reconnect
+// backoff may have given up. Coming back: revive a dead socket (onopen then
+// resyncs), or resync over a live one in case pushes were missed.
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState !== 'visible' || !getTokenFn) return
+  if (!ws || ws.readyState >= WebSocket.CLOSING) {
+    const getter = getTokenFn
+    const token = getter()
+    if (token) useWebSocket().connect(token, getter)
+  } else {
+    useTaskStore().fetchTasks()
+  }
+})
 
 export function useWebSocket() {
   function connect(token, tokenGetter) {
@@ -29,6 +44,9 @@ export function useWebSocket() {
     ws.onopen = () => {
       connected.value = true
       failCount = 0
+      // Pushes sent while we were disconnected are lost; pull current state.
+      if (everOpened) { useTaskStore().fetchTasks(); useCartStore().fetchCarts() }
+      everOpened = true
       if (reconnectTimer) {
         clearTimeout(reconnectTimer)
         reconnectTimer = null

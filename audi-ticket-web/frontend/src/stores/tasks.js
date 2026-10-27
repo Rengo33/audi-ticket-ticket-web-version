@@ -37,43 +37,39 @@ export const useTaskStore = defineStore('tasks', () => {
     }
   }
   
-  async function startTask(taskId) {
+  // Optimistic: flip the card at once and lock its buttons; the server's
+  // task_update over the WebSocket confirms. Refetch only on failure.
+  async function act(taskId, status, call) {
+    const task = tasks.value.find(t => t.id === taskId)
+    if (task) { task.status = status; task.pending = true }
     try {
-      await api.post(`/api/tasks/${taskId}/start`)
-      await fetchTasks()
+      await call()
       return true
     } catch (e) {
       error.value = e.message
+      await fetchTasks()
       return false
+    } finally {
+      if (task) task.pending = false
     }
   }
-  
-  async function stopTask(taskId) {
-    try {
-      await api.post(`/api/tasks/${taskId}/stop`)
-      await fetchTasks()
-      return true
-    } catch (e) {
-      // Even on error, refresh tasks to sync state with backend
-      await fetchTasks()
-      error.value = e.message
-      return false
-    }
-  }
-  
+
+  const startTask = (taskId) => act(taskId, 'running', () => api.post(`/api/tasks/${taskId}/start`))
+  const stopTask = (taskId) => act(taskId, 'stopped', () => api.post(`/api/tasks/${taskId}/stop`))
+
   async function deleteTask(taskId) {
+    const prev = tasks.value
+    tasks.value = prev.filter(t => t.id !== taskId)
     try {
       await api.delete(`/api/tasks/${taskId}`)
-      tasks.value = tasks.value.filter(t => t.id !== taskId)
       return true
     } catch (e) {
-      // Even on error, refresh tasks to sync state
-      await fetchTasks()
+      tasks.value = prev
       error.value = e.message
       return false
     }
   }
-  
+
   function updateTask(taskId, updates) {
     const task = tasks.value.find(t => t.id === taskId)
     if (!task) return
