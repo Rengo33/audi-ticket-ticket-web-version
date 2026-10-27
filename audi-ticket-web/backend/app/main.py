@@ -3,6 +3,8 @@ FastAPI Main Application
 """
 import asyncio
 import logging
+import logging.handlers
+import os
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -25,6 +27,13 @@ logging.basicConfig(
     level=logging.DEBUG if settings.debug else logging.INFO,
     datefmt='%H:%M:%S'
 )
+# Also keep logs on disk: data/ is a host bind mount, so this survives container
+# rebuilds (docker logs don't) and task deletion (which drops task_logs rows).
+os.makedirs("data/logs", exist_ok=True)
+_file_log = logging.handlers.RotatingFileHandler(
+    "data/logs/backend.log", maxBytes=10_000_000, backupCount=10, encoding="utf-8")
+_file_log.setFormatter(logging.Formatter('[%(asctime)s] %(levelname)s: %(message)s', '%Y-%m-%d %H:%M:%S'))
+logging.getLogger().addHandler(_file_log)
 
 
 @asynccontextmanager

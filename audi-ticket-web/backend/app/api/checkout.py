@@ -19,6 +19,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from ..auth import get_current_user
+from ..bot.core import shop_curl_options
 from ..config import get_settings
 from ..database import get_db
 from ..models import BillingProfile, CartSession, Task
@@ -49,7 +50,7 @@ async def _evict_session(token: str) -> None:
 async def _get_proxy_session(cart: CartSession) -> AsyncSession:
     entry = _proxy_sessions.get(cart.token)
     if entry is None:
-        session = AsyncSession(impersonate="chrome120")
+        session = AsyncSession(impersonate="safari17_2_ios", curl_options=shop_curl_options())
         session.cookies.set(cart.cookie_name, cart.cookie_value, domain=cart.cookie_domain)
         _proxy_sessions[cart.token] = (session, cart.expires_at)
         return session

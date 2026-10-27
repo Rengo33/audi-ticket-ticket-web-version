@@ -6,12 +6,15 @@ import asyncio
 import re
 import json
 import logging
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
+from zoneinfo import ZoneInfo
 from typing import Optional, List, Dict, Any, Tuple
 from dataclasses import dataclass, asdict
 
 from curl_cffi.requests import AsyncSession
 from bs4 import BeautifulSoup
+
+from .core import shop_curl_options
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +55,7 @@ class BayernScraper:
         self.session: Optional[AsyncSession] = None
     
     async def __aenter__(self):
-        self.session = AsyncSession(impersonate="chrome120")
+        self.session = AsyncSession(impersonate="safari17_2_ios", curl_options=shop_curl_options())
         return self
     
     async def __aexit__(self, exc_type, exc_val, exc_tb):
@@ -329,7 +332,7 @@ async def get_listing_products() -> Dict[str, Optional[int]]:
     """
     page_url = lambda p: f"{BASE_URL}/kategorien?___store=wl_de&p={p}"
     htmls: List[str] = []
-    async with AsyncSession(impersonate="chrome120") as s:
+    async with AsyncSession(impersonate="safari17_2_ios", curl_options=shop_curl_options()) as s:
         first = await s.get(page_url(1))
         if first.status_code != 200:
             raise RuntimeError(f"listing page 1 returned {first.status_code}")
@@ -387,13 +390,17 @@ async def get_listing_products() -> Dict[str, Optional[int]]:
                 products.setdefault(_normalize(link["href"]), None)
     return products
 
-WIDGET_URL = BASE_URL + "/bookingwidget/vendor/30797/id/{}"
+WIDGET_PATH = "/bookingwidget/vendor/30797/id/{}"
+# The widget route is served by the booking service, which is reachable on
+# regiondo.net (AWS, no Cloudflare) as well as on the shop host (Cloudflare).
+# regiondo.net is primary: from the server IP the shop host gets 403 for hours
+# at a time, regiondo.net never did. The shop host stays as fallback.
+WIDGET_URLS = ("https://regiondo.net" + WIDGET_PATH, BASE_URL + WIDGET_PATH)
 _WIDGET_TITLE = re.compile(r"<title>\s*(.*?)\s*bei Regiondo", re.S)
 _WIDGET_BRAND = re.compile(r"'brand':\s*'([^']*)'")
-# Cloudflare challenges this route from the server IP. safari17_2_ios is the
-# only impersonation target that reliably gets through (chrome* ~0-25%), and a
-# long-lived session keeps __cf_bm + the connection, cutting 403s further.
-# Extra headers (Accept-Language, Referer) break the fingerprint — don't add any.
+# safari17_2_ios is the only impersonation target that reliably gets through
+# Cloudflare (chrome* ~0-25%), and a long-lived session keeps __cf_bm + the
+# connection. Extra headers (Accept-Language, Referer) break the fingerprint.
 _widget_session: Optional[AsyncSession] = None
 
 
@@ -406,7 +413,11 @@ async def widget_lookup(pid: int) -> Optional[Tuple[str, str]]:
     global _widget_session
     if _widget_session is None:
         _widget_session = AsyncSession(impersonate="safari17_2_ios", timeout=15)
-    r = await _widget_session.get(WIDGET_URL.format(pid))
+    r = None
+    for url in WIDGET_URLS:
+        r = await _widget_session.get(url.format(pid))
+        if r.status_code in (200, 404):
+            break
     if r.status_code == 404:
         return None
     if r.status_code != 200:
@@ -421,6 +432,114 @@ async def widget_lookup(pid: int) -> Optional[Tuple[str, str]]:
 def product_view_url(pid: int) -> str:
     """Public product page by ID: 301 to /kategorien while hidden, 200 once live."""
     return f"{BASE_URL}/catalog/product/view/id/{pid}"
+
+
+# --- early description -------------------------------------------------------
+# A draft product's description text is served nowhere: the storefront 301s, the
+# search index skips it, the shopping-experience-api 404s it (only published /
+# inactive-but-visible products are in there). The text itself is a template
+# though (competition, opponent, kickoff, paper-ticket note, pickup window,
+# eligibility), and everything but the pickup window is derivable early:
+# name from the booking widget, date/time from catalog_ajax/dates by ticket_id.
+API_HOST = "https://shopping-experience-api.prod.regiondo.net/api/v1/products/{}"
+API_HEADERS = {"x-tenant": "REGIONDO", "x-locale": "de-DE", "x-partner-code": "AU43"}
+# Match ticket IDs trail the product ID by ~27540-27580 (Audi creates the ticket
+# right after the product); the band is walked rather than offset-calculated
+# because the exact gap drifts with other tenants' products.
+TICKET_BAND = 130
+_WEEKDAYS = ("Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag")
+
+
+async def _live_description(pid: int) -> Optional[dict]:
+    """The API's own description data — only once the product is visible, but
+    then it is the real text, so it wins over the reconstruction."""
+    async with AsyncSession(impersonate="safari17_2_ios") as s:
+        r = await s.get(API_HOST.format(pid), headers=API_HEADERS)
+    if r.status_code != 200:
+        return None
+    return r.json().get("information")
+
+
+def _strip_html(html: str) -> str:
+    text = BeautifulSoup(html or "", "html.parser").get_text("\n", strip=True)
+    return re.sub(r"\n{3,}", "\n\n", text)
+
+
+async def _slot(ticket_id: int) -> Optional[Tuple[str, str, int]]:
+    """(date, time, variation count) for one ticket ID, via the dates route,
+    which is keyed on ticket_id only (the product ID in the path is ignored)."""
+    url = (f"{BASE_URL}/product/catalog_ajax/dates/vendor/30797/id/0/bookingwidget/1/"
+           f"?___store=wl_de&ticket_id={ticket_id}&availabilityType=starttime")
+    async with AsyncSession(impersonate="safari17_2_ios", curl_options=shop_curl_options()) as s:
+        r = await s.get(url)
+    m = re.search(r"setAvailableDateTimes\(\{(.*?)\}\);", r.text, re.S)
+    if r.status_code != 200 or not m:
+        return None
+    data = json.loads("{" + m.group(1) + "}")
+    if len(data) != 1:  # a match has exactly one date; tours/other events don't
+        return None
+    (date, slots), = data.items()
+    slot = slots[0]
+    return date, slot.get("time", ""), len(slot.get("variations") or [])
+
+
+def _match_day(found: dict, today: str) -> Optional[Tuple[str, str]]:
+    """Pick the game out of the band: Audi creates the Neckarsulm/Ingolstadt
+    twins as consecutive ticket IDs with 2 resp. 3 variations, same date and
+    kickoff time. Single ticket IDs with 1-3 variations are tours, skip them."""
+    for tid, (date, time, nvar) in found.items():
+        if date >= today and nvar in (2, 3) and tid + 1 in found \
+                and found[tid + 1][:2] == (date, time):
+            return date, time
+    return None
+
+
+async def _match_slot(pid: int, today: str) -> Optional[Tuple[str, str]]:
+    for base in (pid + 27570, pid + 27540, pid + 27600):
+        band = range(base, base + TICKET_BAND)
+        results = await asyncio.gather(*(_slot(t) for t in band), return_exceptions=True)
+        found = {t: r for t, r in zip(band, results) if r and not isinstance(r, Exception)}
+        hit = _match_day(found, today)
+        if hit:
+            return hit
+    return None
+
+
+def _reconstruct(name: str, date: str, time: str) -> str:
+    """Description from what is readable before publication. Mirrors the live
+    template for FC Bayern matches; pickup is five days before the match."""
+    opponent = re.sub(r"\s*\([^)]*\)\s*$", "", name.split(" - ", 1)[-1]).strip(" -")
+    venue = "Neckarsulm" if "neckarsulm" in name.lower() else "Ingolstadt"
+    match = datetime.strptime(date, "%Y-%m-%d").date()
+    pickup = (match - timedelta(days=5)).strftime("%d.%m.%Y")
+    kickoff = time.split("-")[0][:5]
+    return (
+        f"FC BAYERN MÜNCHEN – {opponent}\n"
+        f"{_WEEKDAYS[match.weekday()]}, {match.strftime('%d.%m.%Y')} | Anstoß: {kickoff} Uhr\n\n"
+        "FÜR DIESES SPIEL WERDEN DIE TICKETS WIE GEWOHNT IN PAPIERFORM VERKAUFT!\n\n"
+        f"Zeitraum der Abholung: {pickup} bis {match.strftime('%d.%m.%Y')} jeweils von "
+        f"08:00 Uhr bis 16:00 Uhr am Zentralen Empfang (Gebäude S43) im Audi Forum {venue}\n\n"
+        "Gilt ausschließlich für Mitarbeitende der AUDI AG, deren Tochtergesellschaften "
+        "und Mitglieder des Audi Fanclubs FC Bayern München."
+    )
+
+
+async def early_description(pid: int, name: str) -> Optional[str]:
+    """Description of a product that may still be a draft. Live text if the
+    product already went visible, else reconstructed from name + match slot.
+    None = neither available (the detector then just omits the field)."""
+    info = await _live_description(pid)
+    if info:
+        text = _strip_html(info.get("detailedDescription", {}).get("body", "")
+                           or info.get("description", {}).get("body", ""))
+        return text or None
+    if not name:
+        return None
+    today = datetime.now(ZoneInfo("Europe/Berlin")).date().isoformat()
+    slot = await _match_slot(pid, today)
+    if not slot:
+        return None
+    return _reconstruct(name, *slot)
 
 
 def _normalize(u: str) -> str:

@@ -89,7 +89,7 @@ async def start_detector(
     _: bool = Depends(get_current_user),
 ):
     cfg = _row(db)
-    cfg.poll_interval = max(3.0, data.poll_interval)
+    cfg.poll_interval = max(150.0, data.poll_interval)  # Cloudflare
     cfg.keyword = data.keyword.strip()
     cfg.quantity = data.quantity
     cfg.num_threads = data.num_threads
