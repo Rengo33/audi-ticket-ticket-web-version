@@ -19,7 +19,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from ..auth import get_current_user
-from ..bot.core import shop_curl_options
+from ..bot.core import shop_curl_options, shop_via_origin_enabled
 from ..config import get_settings
 from ..database import get_db
 from ..models import BillingProfile, CartSession, Task
@@ -33,14 +33,15 @@ router = APIRouter(tags=["checkout"])
 
 # ─── Cart session cache ──────────────────────────────────────────────
 # One AsyncSession per cart token so cookies stick across proxy hops.
-# Entries self-evict when their cart expires or is unreachable.
-_proxy_sessions: Dict[str, Tuple[AsyncSession, datetime]] = {}
+# Entries self-evict when their cart expires or is unreachable, and are rebuilt
+# when the shop route they were pinned to (via_origin) no longer matches.
+_proxy_sessions: Dict[str, Tuple[AsyncSession, datetime, bool]] = {}
 
 
 async def _evict_session(token: str) -> None:
     entry = _proxy_sessions.pop(token, None)
     if entry:
-        session, _ = entry
+        session = entry[0]
         try:
             await session.close()
         except Exception:
@@ -49,10 +50,13 @@ async def _evict_session(token: str) -> None:
 
 async def _get_proxy_session(cart: CartSession) -> AsyncSession:
     entry = _proxy_sessions.get(cart.token)
+    if entry and entry[2] != shop_via_origin_enabled():
+        await _evict_session(cart.token)
+        entry = None
     if entry is None:
         session = AsyncSession(impersonate="safari17_2_ios", curl_options=shop_curl_options())
         session.cookies.set(cart.cookie_name, cart.cookie_value, domain=cart.cookie_domain)
-        _proxy_sessions[cart.token] = (session, cart.expires_at)
+        _proxy_sessions[cart.token] = (session, cart.expires_at, shop_via_origin_enabled())
         return session
     return entry[0]
 

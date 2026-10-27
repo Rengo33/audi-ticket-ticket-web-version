@@ -14,9 +14,10 @@ from .config import get_settings
 from .database import init_db, SessionLocal
 from .api import auth, tasks, checkout, websocket, games, billing, push, detector, settings as settings_api
 from .bot.monitor import task_manager
+from .bot.core import set_shop_via_origin
 from .bot.release_detector import release_detector
 from .bot import web_push
-from .models import Task, TaskStatus, ReleaseDetector
+from .models import AppSettings, Task, TaskStatus, ReleaseDetector
 from .scheduler import scheduler
 
 settings = get_settings()
@@ -42,7 +43,12 @@ async def lifespan(app: FastAPI):
     # Startup
     logging.info("Starting Audi Ticket Bot Web...")
     init_db()
-    
+    db = SessionLocal()
+    try:
+        set_shop_via_origin(AppSettings.get(db).shop_via_origin)
+    finally:
+        db.close()
+
     # Set WebSocket broadcast callback
     task_manager.set_ws_broadcast(websocket.broadcast_message)
 

@@ -42,25 +42,18 @@ def shop_origin_ips() -> list:
     return [ip.strip() for ip in get_settings().shop_origin_ips.split(",") if ip.strip()]
 
 
+# Live origin-route switch. Seeded from the app_settings row at startup and set
+# by PUT /api/settings, so reading it per request is free.
+_shop_via_origin: bool = get_settings().shop_via_origin
+
+
 def shop_via_origin_enabled() -> bool:
-    """Live on/off for the origin-IP route, from the app_settings row so the UI
-    can flip it without a restart. Env `shop_via_origin` is only the seed for a
-    brand-new row. Falls back to the env value if the DB isn't reachable.
-    ponytail: one indexed single-row read per session creation, not per request."""
-    from ..database import SessionLocal
-    from ..models import AppSettings
-    try:
-        db = SessionLocal()
-        try:
-            row = db.query(AppSettings).filter(AppSettings.id == 1).first()
-            if row is None:
-                row = AppSettings(id=1, shop_via_origin=get_settings().shop_via_origin)
-                db.add(row); db.commit()
-            return bool(row.shop_via_origin)
-        finally:
-            db.close()
-    except Exception:
-        return get_settings().shop_via_origin
+    return _shop_via_origin
+
+
+def set_shop_via_origin(enabled: bool):
+    global _shop_via_origin
+    _shop_via_origin = enabled
 
 
 def shop_curl_options() -> dict:
@@ -105,6 +98,7 @@ class AudiTicketBot:
     
     def __init__(self):
         self.session: Optional[AsyncSession] = None
+        self.via_origin: Optional[bool] = None  # shop route the session was built with
         self.last_ok = time.monotonic()  # last 200; survives session recycling
 
     def raise_if_blocked(self):
@@ -121,6 +115,7 @@ class AudiTicketBot:
     
     async def start_session(self):
         """Initialize async session with Safari TLS fingerprint."""
+        self.via_origin = shop_via_origin_enabled()
         self.session = AsyncSession(impersonate="safari17_2_ios", curl_options=shop_curl_options())
     
     async def close_session(self):
@@ -129,14 +124,22 @@ class AudiTicketBot:
             await self.session.close()
             self.session = None
 
-    async def _recycle_if_blocked(self, response):
-        """Cloudflare keeps challenging a session once it has flagged it, while a
-        fresh session usually passes. Without this, a long-lived poller stays
-        blind (403 forever) and misses the release."""
+    async def _fresh_session(self, reason: str):
+        logger.warning(f"{reason} — starting a fresh session")
+        await self.close_session()
+        await self.start_session()
+
+    async def _get(self, url: str):
+        """GET for long-lived pollers. Rebuilds the session when the UI flipped
+        the shop route (it is pinned per session), and after a Cloudflare 403:
+        a flagged session stays challenged while a fresh one usually passes, so
+        without this a poller stays blind and misses the release."""
+        if self.via_origin != shop_via_origin_enabled():
+            await self._fresh_session("Shop mode changed")
+        response = await self.session.get(url)
         if response.status_code == 403:
-            logger.warning("Cloudflare 403 — starting a fresh session")
-            await self.close_session()
-            await self.start_session()
+            await self._fresh_session("Cloudflare 403")
+        return response
 
     async def api_ticket_id(self, product_id: str) -> Optional[str]:
         """Ticket ID of a visible product via the product API, None while hidden.
@@ -163,13 +166,12 @@ class AudiTicketBot:
             logger.info(f"Extracting event details from: {product_url}")
             logger.info(f"Session object: {self.session}")
 
-            response = await self.session.get(product_url)
+            response = await self._get(product_url)
 
             logger.info(f"Response status: {response.status_code}, length: {len(response.text)}")
 
             if response.status_code != 200:
                 logger.error(f"Status {response.status_code} fetching product page")
-                await self._recycle_if_blocked(response)
                 return None, None, []
             self.last_ok = time.monotonic()
 
@@ -220,7 +222,7 @@ class AudiTicketBot:
         )
         
         try:
-            response = await self.session.get(url)
+            response = await self._get(url)
             
             logger.debug(f"[Availability] URL: {url}")
             logger.debug(f"[Availability] Status: {response.status_code}")
@@ -243,7 +245,6 @@ class AudiTicketBot:
                     logger.warning(f"[Availability] Could not parse response - pattern not found")
             else:
                 logger.warning(f"[Availability] Non-200 status: {response.status_code}")
-                await self._recycle_if_blocked(response)
                     
         except Exception as e:
             logger.error(f"[Availability] Error: {e}")

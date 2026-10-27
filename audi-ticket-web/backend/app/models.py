@@ -232,4 +232,15 @@ class AppSettings(Base):
     __tablename__ = "app_settings"
 
     id = Column(Integer, primary_key=True, default=1)
-    shop_via_origin = Column(Boolean, default=False)
+    shop_via_origin = Column(Boolean)
+
+    @classmethod
+    def get(cls, db) -> "AppSettings":
+        """The singleton row, created from the env seed on first access."""
+        row = db.get(cls, 1)
+        if row is None:
+            from .config import get_settings
+            row = cls(id=1, shop_via_origin=get_settings().shop_via_origin)
+            db.add(row)
+            db.commit()
+        return row

@@ -12,19 +12,6 @@
       </button>
     </div>
 
-    <!-- Shop connection mode -->
-    <div class="shop-mode">
-      <div class="shop-mode-text">
-        <span class="eyebrow">Shop connection</span>
-        <strong>{{ shopViaOrigin ? 'Direct to origin (bypasses Cloudflare)' : 'Via Cloudflare (default)' }}</strong>
-        <small>Switch to direct only while Cloudflare is blocking the server IP.</small>
-      </div>
-      <label class="switch" :class="{ busy: shopBusy }">
-        <input type="checkbox" :checked="shopViaOrigin" :disabled="shopBusy" @change="toggleShopMode($event.target.checked)" />
-        <span class="track"></span>
-      </label>
-    </div>
-
     <!-- Scheduled -->
     <section v-if="scheduledTasks.length > 0" class="section">
       <div class="section-head">
@@ -135,6 +122,16 @@
         </article>
       </div>
     </section>
+
+    <!-- Shop route: Cloudflare (default) or straight to origin while CF blocks us -->
+    <div class="shop-mode">
+      <span :class="{ on: !shopViaOrigin }">Cloudflare</span>
+      <label class="switch" :class="{ busy: shopBusy }">
+        <input type="checkbox" :checked="shopViaOrigin" :disabled="shopBusy" @change="toggleShopMode($event.target.checked)" />
+        <span class="track"></span>
+      </label>
+      <span :class="{ on: shopViaOrigin }">Bypass</span>
+    </div>
 
     <!-- Create Modal -->
     <!-- Teleport to body so the overlay escapes .stage's overflow:auto.
@@ -300,13 +297,10 @@ onMounted(() => {
 
 <style scoped>
 .shop-mode {
-  display: flex; align-items: center; justify-content: space-between; gap: 1rem;
-  background: var(--surface); border: 1px solid var(--line);
-  border-radius: var(--radius-lg); padding: 0.85rem 1rem; margin-bottom: 1.5rem;
+  display: flex; align-items: center; justify-content: center; gap: 0.6rem;
+  margin-top: 2rem; font-size: 0.75rem; color: var(--ink-3);
 }
-.shop-mode-text { display: flex; flex-direction: column; gap: 2px; }
-.shop-mode-text strong { font-size: 0.875rem; font-weight: 600; letter-spacing: -0.01em; }
-.shop-mode-text small { color: var(--ink-3); font-size: 0.75rem; }
+.shop-mode .on { color: var(--ink); font-weight: 600; }
 .switch { position: relative; display: inline-flex; flex-shrink: 0; cursor: pointer; }
 .switch.busy { opacity: 0.5; cursor: wait; }
 .switch input { position: absolute; opacity: 0; width: 0; height: 0; }
