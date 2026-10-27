@@ -52,7 +52,11 @@ class ApiClient {
   post(url, data) {
     return this.request('POST', url, data)
   }
-  
+
+  put(url, data) {
+    return this.request('PUT', url, data)
+  }
+
   delete(url) {
     return this.request('DELETE', url)
   }

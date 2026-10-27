@@ -174,6 +174,21 @@ async def send_discord_new_event(product_url: str, carted: bool, name: str = "",
     await send_discord_message(msg)
 
 
+async def send_discord_blocked(what: str, reason: str):
+    """A poller gave up because the site stopped answering (Cloudflare)."""
+    msg = {
+        "username": "Audi Ticket Bot",
+        "embeds": [_embed(
+            "⛔ Blocked — stopped to protect the server IP",
+            0xDC052D,
+            [_field("Stopped", what), _field("Reason", reason),
+             _field("Next step", "Check from the server whether requests get through again, then restart.")],
+            thumbnail=False,
+        )]
+    }
+    await send_discord_message(msg)
+
+
 async def send_discord_cart_success(
     product_url: str,
     cookie: CookieData,

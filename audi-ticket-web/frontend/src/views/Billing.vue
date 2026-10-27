@@ -187,7 +187,7 @@ const saveProfile = async () => {
   }
   saving.value = true;
   try {
-    if (editingId.value) await api.request('PUT', `/api/billing/profiles/${editingId.value}`, form.value);
+    if (editingId.value) await api.put(`/api/billing/profiles/${editingId.value}`, form.value);
     else await api.post('/api/billing/profiles', form.value);
     await fetchProfiles();
     closeModal();

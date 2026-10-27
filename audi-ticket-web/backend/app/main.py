@@ -3,6 +3,8 @@ FastAPI Main Application
 """
 import asyncio
 import logging
+import logging.handlers
+import os
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -10,11 +12,12 @@ from fastapi.staticfiles import StaticFiles
 
 from .config import get_settings
 from .database import init_db, SessionLocal
-from .api import auth, tasks, checkout, websocket, games, billing, push, detector
+from .api import auth, tasks, checkout, websocket, games, billing, push, detector, settings as settings_api
 from .bot.monitor import task_manager
+from .bot.core import set_shop_via_origin
 from .bot.release_detector import release_detector
 from .bot import web_push
-from .models import Task, TaskStatus, ReleaseDetector
+from .models import AppSettings, Task, TaskStatus, ReleaseDetector
 from .scheduler import scheduler
 
 settings = get_settings()
@@ -25,6 +28,13 @@ logging.basicConfig(
     level=logging.DEBUG if settings.debug else logging.INFO,
     datefmt='%H:%M:%S'
 )
+# Also keep logs on disk: data/ is a host bind mount, so this survives container
+# rebuilds (docker logs don't) and task deletion (which drops task_logs rows).
+os.makedirs("data/logs", exist_ok=True)
+_file_log = logging.handlers.RotatingFileHandler(
+    "data/logs/backend.log", maxBytes=10_000_000, backupCount=10, encoding="utf-8")
+_file_log.setFormatter(logging.Formatter('[%(asctime)s] %(levelname)s: %(message)s', '%Y-%m-%d %H:%M:%S'))
+logging.getLogger().addHandler(_file_log)
 
 
 @asynccontextmanager
@@ -33,7 +43,12 @@ async def lifespan(app: FastAPI):
     # Startup
     logging.info("Starting Audi Ticket Bot Web...")
     init_db()
-    
+    db = SessionLocal()
+    try:
+        set_shop_via_origin(AppSettings.get(db).shop_via_origin)
+    finally:
+        db.close()
+
     # Set WebSocket broadcast callback
     task_manager.set_ws_broadcast(websocket.broadcast_message)
 
@@ -125,6 +140,7 @@ app.include_router(games.router, prefix="/api")
 app.include_router(billing.router, prefix="/api")
 app.include_router(push.router, prefix="/api")
 app.include_router(detector.router, prefix="/api")
+app.include_router(settings_api.router, prefix="/api")
 app.include_router(checkout.router)
 app.include_router(websocket.router)
 

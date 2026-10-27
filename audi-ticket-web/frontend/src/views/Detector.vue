@@ -45,7 +45,7 @@
           <small>Combine terms with <code>+</code> (AND), e.g. <code>dortmund+ingolstadt</code>. Empty = every new event.</small>
         </label>
         <label>Poll interval (s)
-          <input v-model.number="cfg.poll_interval" type="number" min="3" step="1" />
+          <input v-model.number="cfg.poll_interval" type="number" min="150" step="1" />
         </label>
         <label>Quantity
           <input v-model.number="cfg.quantity" type="number" min="1" max="4" />
@@ -112,7 +112,7 @@ let timer = null
 
 const cfg = reactive({
   keyword: 'fc-bayern',
-  poll_interval: 10,
+  poll_interval: 150,
   quantity: 1,
   price_category: 0,
   num_threads: 1,

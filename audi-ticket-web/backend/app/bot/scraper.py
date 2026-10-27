@@ -13,6 +13,8 @@ from dataclasses import dataclass, asdict
 from curl_cffi.requests import AsyncSession
 from bs4 import BeautifulSoup
 
+from .core import shop_curl_options
+
 logger = logging.getLogger(__name__)
 
 
@@ -52,7 +54,7 @@ class BayernScraper:
         self.session: Optional[AsyncSession] = None
     
     async def __aenter__(self):
-        self.session = AsyncSession(impersonate="chrome120")
+        self.session = AsyncSession(impersonate="safari17_2_ios", curl_options=shop_curl_options())
         return self
     
     async def __aexit__(self, exc_type, exc_val, exc_tb):
@@ -329,7 +331,7 @@ async def get_listing_products() -> Dict[str, Optional[int]]:
     """
     page_url = lambda p: f"{BASE_URL}/kategorien?___store=wl_de&p={p}"
     htmls: List[str] = []
-    async with AsyncSession(impersonate="chrome120") as s:
+    async with AsyncSession(impersonate="safari17_2_ios", curl_options=shop_curl_options()) as s:
         first = await s.get(page_url(1))
         if first.status_code != 200:
             raise RuntimeError(f"listing page 1 returned {first.status_code}")
@@ -387,13 +389,17 @@ async def get_listing_products() -> Dict[str, Optional[int]]:
                 products.setdefault(_normalize(link["href"]), None)
     return products
 
-WIDGET_URL = BASE_URL + "/bookingwidget/vendor/30797/id/{}"
+WIDGET_PATH = "/bookingwidget/vendor/30797/id/{}"
+# The widget route is served by the booking service, which is reachable on
+# regiondo.net (AWS, no Cloudflare) as well as on the shop host (Cloudflare).
+# regiondo.net is primary: from the server IP the shop host gets 403 for hours
+# at a time, regiondo.net never did. The shop host stays as fallback.
+WIDGET_URLS = ("https://regiondo.net" + WIDGET_PATH, BASE_URL + WIDGET_PATH)
 _WIDGET_TITLE = re.compile(r"<title>\s*(.*?)\s*bei Regiondo", re.S)
 _WIDGET_BRAND = re.compile(r"'brand':\s*'([^']*)'")
-# Cloudflare challenges this route from the server IP. safari17_2_ios is the
-# only impersonation target that reliably gets through (chrome* ~0-25%), and a
-# long-lived session keeps __cf_bm + the connection, cutting 403s further.
-# Extra headers (Accept-Language, Referer) break the fingerprint — don't add any.
+# safari17_2_ios is the only impersonation target that reliably gets through
+# Cloudflare (chrome* ~0-25%), and a long-lived session keeps __cf_bm + the
+# connection. Extra headers (Accept-Language, Referer) break the fingerprint.
 _widget_session: Optional[AsyncSession] = None
 
 
@@ -406,7 +412,11 @@ async def widget_lookup(pid: int) -> Optional[Tuple[str, str]]:
     global _widget_session
     if _widget_session is None:
         _widget_session = AsyncSession(impersonate="safari17_2_ios", timeout=15)
-    r = await _widget_session.get(WIDGET_URL.format(pid))
+    r = None
+    for url in WIDGET_URLS:
+        r = await _widget_session.get(url.format(pid))
+        if r.status_code in (200, 404):
+            break
     if r.status_code == 404:
         return None
     if r.status_code != 200:

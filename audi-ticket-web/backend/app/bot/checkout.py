@@ -2,7 +2,7 @@
 Auto Checkout (ACO) — server-side billing + Stripe payment.
 
 Two confirm paths:
-  * pure-HTTP via curl_cffi chrome120 impersonation (fast, no Chromium)
+  * pure-HTTP via curl_cffi safari17_2_ios impersonation (fast, no Chromium)
   * Playwright headless Chromium (legacy, ~1 GB RAM per run)
 
 Dispatch is controlled by settings.use_pure_http_confirm. When the pure-HTTP
@@ -26,6 +26,7 @@ from curl_cffi.requests import AsyncSession
 from ..config import get_settings
 from ..crypto import decrypt
 from ..models import BillingProfile
+from .core import shop_curl_options, shop_origin_ips, shop_via_origin_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -141,6 +142,13 @@ class CheckoutResult:
     invoice_url: str = ""
 
 
+def _resolver_arg() -> list:
+    """Chromium equivalent of the curl RESOLVE pin — the payment page has to
+    reach the same origin the cart session talks to, or Cloudflare 403s it."""
+    ips = shop_origin_ips() if shop_via_origin_enabled() else []
+    return [f"--host-resolver-rules=MAP {get_settings().audi_host} {ips[0]}"] if ips else []
+
+
 class AutoCheckout:
     """Handles billing (server-side) and payment (Stripe)."""
 
@@ -150,7 +158,7 @@ class AutoCheckout:
         self.cookie_value = cookie_value
 
     async def __aenter__(self):
-        self.session = AsyncSession(impersonate="chrome120")
+        self.session = AsyncSession(impersonate="safari17_2_ios", curl_options=shop_curl_options())
         self.session.cookies.set(self.cookie_name, self.cookie_value, domain="audidefuehrungen2.regiondo.de")
         return self
 
@@ -371,7 +379,7 @@ class AutoCheckout:
                     browser = await p.chromium.launch(
                         headless=True,
                         channel="chromium-headless-shell",
-                        args=['--no-sandbox', '--disable-dev-shm-usage'],
+                        args=['--no-sandbox', '--disable-dev-shm-usage'] + _resolver_arg(),
                     )
                     context = await browser.new_context()
                     # Seed the Audi cart cookie so the page renders against the
@@ -649,7 +657,7 @@ def _build_stripe_confirm_body(client_secret: str, cardholder: str, card: dict) 
 
 async def _stripe_confirm(pi_id: str, client_secret: str, cardholder: str, card: dict) -> dict:
     body = _build_stripe_confirm_body(client_secret, cardholder, card)
-    async with AsyncSession(impersonate="chrome120") as s:
+    async with AsyncSession(impersonate="safari17_2_ios") as s:
         r = await s.post(
             f"https://api.stripe.com/v1/payment_intents/{pi_id}/confirm",
             data=urlencode(body),
@@ -669,7 +677,7 @@ async def _stripe_get_pi(pi_id: str, client_secret: str) -> dict:
     confirm failure: if Stripe's server-side state is already terminal,
     don't issue a second confirm (which would fail with
     payment_intent_unexpected_state and orphan the user's auth hold)."""
-    async with AsyncSession(impersonate="chrome120") as s:
+    async with AsyncSession(impersonate="safari17_2_ios") as s:
         r = await s.get(
             f"https://api.stripe.com/v1/payment_intents/{pi_id}",
             params={"key": STRIPE_PK, "client_secret": client_secret},
@@ -684,7 +692,7 @@ async def _stripe_get_pi(pi_id: str, client_secret: str) -> dict:
 
 async def _stripe_3ds2_authenticate(source: str) -> dict:
     body = {"source": source, "key": STRIPE_PK, "is_stripe_sdk": "true"}
-    async with AsyncSession(impersonate="chrome120") as s:
+    async with AsyncSession(impersonate="safari17_2_ios") as s:
         r = await s.post(
             "https://api.stripe.com/v1/3ds2/authenticate",
             data=urlencode(body),
@@ -701,7 +709,7 @@ async def _stripe_3ds2_authenticate(source: str) -> dict:
 async def _stripe_poll_pi(pi_id: str, client_secret: str, timeout_s: int = 180) -> dict:
     terminal = {*STRIPE_STATUS_TERMINAL_OK, "canceled", "requires_payment_method"}
     start = time.monotonic()
-    async with AsyncSession(impersonate="chrome120") as s:
+    async with AsyncSession(impersonate="safari17_2_ios") as s:
         last_status = None
         while time.monotonic() - start < timeout_s:
             r = await s.get(

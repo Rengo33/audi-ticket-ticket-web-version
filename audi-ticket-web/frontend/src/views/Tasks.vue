@@ -6,10 +6,21 @@
         <div class="eyebrow">MONITORING</div>
         <h1 class="view-title">Tasks</h1>
       </div>
-      <button @click="showModal = true" class="btn btn-primary">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-        <span>New task</span>
-      </button>
+      <div class="head-actions">
+        <!-- Shop route: Cloudflare (default) or straight to origin while CF blocks us -->
+        <div class="shop-mode">
+          <span :class="{ on: !shopViaOrigin }">Cloudflare</span>
+          <label class="switch" :class="{ busy: shopBusy }">
+            <input type="checkbox" :checked="shopViaOrigin" :disabled="shopBusy" @change="toggleShopMode($event.target.checked)" />
+            <span class="track"></span>
+          </label>
+          <span :class="{ on: shopViaOrigin }">Bypass</span>
+        </div>
+        <button @click="showModal = true" class="btn btn-primary" aria-label="New task">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+          <span>New task</span>
+        </button>
+      </div>
     </div>
 
     <!-- Scheduled -->
@@ -263,14 +274,52 @@ const fetchBillingProfiles = async () => {
   try { billingProfiles.value = await api.get('/api/billing/profiles'); } catch { /* ignore */ }
 };
 
+const shopViaOrigin = ref(false);
+const shopBusy = ref(false);
+const fetchShopMode = async () => {
+  try { shopViaOrigin.value = (await api.get('/api/settings')).shop_via_origin; } catch { /* ignore */ }
+};
+const toggleShopMode = async (enabled) => {
+  shopBusy.value = true;
+  try {
+    shopViaOrigin.value = (await api.put('/api/settings', { shop_via_origin: enabled })).shop_via_origin;
+  } catch {
+    await fetchShopMode();  // revert the checkbox to the real state on failure
+  } finally { shopBusy.value = false; }
+};
+
 onMounted(() => {
   if (taskStore.tasks.length === 0) taskStore.fetchTasks();
   fetchScheduled();
   fetchBillingProfiles();
+  fetchShopMode();
 });
 </script>
 
 <style scoped>
+.shop-mode {
+  display: flex; align-items: center; gap: 0.5rem;
+  font-size: 0.75rem; color: var(--ink-3);
+}
+.head-actions { display: flex; align-items: center; gap: 1rem; }
+/* Phone width: icon-only button so title, switch and button share one row. */
+@media (max-width: 480px) { .head-actions .btn span { display: none; } }
+.shop-mode .on { color: var(--ink); font-weight: 600; }
+.switch { position: relative; display: inline-flex; flex-shrink: 0; cursor: pointer; }
+.switch.busy { opacity: 0.5; cursor: wait; }
+.switch input { position: absolute; opacity: 0; width: 0; height: 0; }
+.switch .track {
+  width: 42px; height: 24px; border-radius: 999px;
+  background: var(--ink-4); transition: background 0.15s;
+}
+.switch .track::after {
+  content: ''; position: absolute; top: 3px; left: 3px;
+  width: 18px; height: 18px; border-radius: 50%; background: #fff;
+  transition: transform 0.15s;
+}
+.switch input:checked + .track { background: var(--ok); }
+.switch input:checked + .track::after { transform: translateX(18px); }
+
 .view-head {
   display: flex; align-items: flex-end; justify-content: space-between;
   gap: 1rem;

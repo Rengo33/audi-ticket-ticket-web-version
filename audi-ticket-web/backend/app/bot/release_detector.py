@@ -12,13 +12,15 @@ import asyncio
 import json
 import re
 import logging
+import time
 from datetime import datetime
 
 from ..database import SessionLocal
 from ..models import Task, ReleaseDetector
 from .scraper import get_listing_products, widget_lookup, product_view_url
 from .monitor import task_manager
-from .discord import send_discord_new_event
+from .core import BLOCKED_GIVE_UP_S, jitter
+from .discord import send_discord_new_event, send_discord_blocked
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +57,7 @@ class ReleaseDetectorManager:
         self._task: asyncio.Task | None = None
         self._gap_skip = 0   # extra misses tolerated next scan (set by a gap probe)
         self._scans = 0
+        self._last_ok = time.monotonic()  # last scan that got real answers
 
     def is_running(self) -> bool:
         return self._task is not None and not self._task.done()
@@ -73,6 +76,7 @@ class ReleaseDetectorManager:
         cfg.active = True
         cfg.error_message = None
         db.commit()
+        self._last_ok = time.monotonic()  # fresh 10-min budget after a manual restart
         if not self.is_running():
             self._task = asyncio.create_task(self._loop())
         return True
@@ -118,7 +122,9 @@ class ReleaseDetectorManager:
         cfg = self._get_cfg(db)
         if not cfg.active:
             raise StopAsyncIteration
-        interval = max(3.0, cfg.poll_interval or 10.0)
+        # Every widget scan hits Cloudflare. Games are created hours to days
+        # before release, so ~2.5 min loses nothing and keeps the IP calm.
+        interval = jitter(max(150.0, cfg.poll_interval or 150.0))
 
         start_id = None
         if cfg.frontier_id is None:
@@ -139,6 +145,12 @@ class ReleaseDetectorManager:
         cfg.error_message = None
 
         acted = await self._scan_frontier(cfg, start_id)
+        down = time.monotonic() - self._last_ok
+        if down > BLOCKED_GIVE_UP_S:
+            # Site stopped answering (Cloudflare): switch off instead of burning the IP.
+            cfg.active = False
+            cfg.error_message = f"stopped: no successful widget fetch for {down / 60:.0f} min (Cloudflare block?)"
+            await send_discord_blocked("Release detector", cfg.error_message)
         if acted:
             cfg.last_new_found_at = datetime.utcnow()
             log = json.loads(cfg.events_log or "[]")
@@ -193,6 +205,7 @@ class ReleaseDetectorManager:
                             acted.append({"url": url, "name": name,
                                           "at": datetime.utcnow().isoformat(), "task_id": tid})
                 pid += 1
+            self._last_ok = time.monotonic()  # no exception: every lookup was answered
             if fid > start:
                 self._gap_skip = 0
             elif self._scans % GAP_PROBE_EVERY == 0:
@@ -212,7 +225,7 @@ class ReleaseDetectorManager:
         logger.info("[Detector] loop started")
         try:
             while True:
-                interval = 10.0
+                interval = 150.0
                 db = SessionLocal()
                 try:
                     interval = await self._scan_once(db)

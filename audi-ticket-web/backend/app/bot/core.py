@@ -6,15 +6,68 @@ import asyncio
 import json
 import re
 import logging
+import random
+import time
 from typing import Optional, Tuple, Dict, Any, Callable
 from datetime import datetime
 from urllib.parse import quote
 from dataclasses import dataclass
 
 from curl_cffi.requests import AsyncSession
+from curl_cffi.const import CurlOpt
 from bs4 import BeautifulSoup
 
+from ..config import get_settings
+
 logger = logging.getLogger(__name__)
+
+# Give up after this long without a single successful fetch (403s, timeouts),
+# so a blocked poller stops instead of burning the server IP further.
+BLOCKED_GIVE_UP_S = 600
+
+
+# Regiondo's product API (not behind Cloudflare). 404 while a product is hidden,
+# 200 from the moment it is visible on the shop (verified on all 77 Audi
+# products), and manufacturerSku "T-AU43-{ticket_id}" gives the ticket.
+PRODUCT_API = "https://shopping-experience-api.prod.regiondo.net/api/v1/products/{}"
+PRODUCT_API_HEADERS = {"x-tenant": "REGIONDO", "x-locale": "de-DE", "x-partner-code": "AU43"}
+
+
+def jitter(seconds: float) -> float:
+    """±30% so polls never form the perfectly regular pattern Cloudflare flags."""
+    return seconds * random.uniform(0.7, 1.3)
+
+
+def shop_origin_ips() -> list:
+    return [ip.strip() for ip in get_settings().shop_origin_ips.split(",") if ip.strip()]
+
+
+# Live origin-route switch. Seeded from the app_settings row at startup and set
+# by PUT /api/settings, so reading it per request is free.
+_shop_via_origin: bool = get_settings().shop_via_origin
+
+
+def shop_via_origin_enabled() -> bool:
+    return _shop_via_origin
+
+
+def set_shop_via_origin(enabled: bool):
+    global _shop_via_origin
+    _shop_via_origin = enabled
+
+
+def shop_curl_options(via_origin: Optional[bool] = None) -> dict:
+    """Pin the shop host to its origin IPs so shop traffic skips Cloudflare.
+    Cloudflare hard-blocks the server IP for hours at a time ("Sorry, you have
+    been blocked") while the origins answer the same routes with 200. Empty
+    dict when disabled, so it can be passed to every session unconditionally."""
+    if not (shop_via_origin_enabled() if via_origin is None else via_origin):
+        return {}
+    return {CurlOpt.RESOLVE: [f"{get_settings().audi_host}:443:{ip}" for ip in shop_origin_ips()]}
+
+
+class SiteBlocked(Exception):
+    """No successful fetch for BLOCKED_GIVE_UP_S — most likely Cloudflare."""
 
 
 @dataclass
@@ -45,6 +98,13 @@ class AudiTicketBot:
     
     def __init__(self):
         self.session: Optional[AsyncSession] = None
+        self.via_origin: Optional[bool] = None  # shop route the session was built with
+        self.last_ok = time.monotonic()  # last 200; survives session recycling
+
+    def raise_if_blocked(self):
+        down = time.monotonic() - self.last_ok
+        if down > BLOCKED_GIVE_UP_S:
+            raise SiteBlocked(f"no successful fetch for {down / 60:.0f} min (Cloudflare block?)")
     
     async def __aenter__(self):
         await self.start_session()
@@ -54,8 +114,9 @@ class AudiTicketBot:
         await self.close_session()
     
     async def start_session(self):
-        """Initialize async session with Chrome TLS fingerprint."""
-        self.session = AsyncSession(impersonate="chrome120")
+        """Initialize async session with Safari TLS fingerprint."""
+        self.via_origin = shop_via_origin_enabled()
+        self.session = AsyncSession(impersonate="safari17_2_ios", curl_options=shop_curl_options())
     
     async def close_session(self):
         """Close the session."""
@@ -63,14 +124,35 @@ class AudiTicketBot:
             await self.session.close()
             self.session = None
 
-    async def _recycle_if_blocked(self, response):
-        """Cloudflare keeps challenging a session once it has flagged it, while a
-        fresh session usually passes. Without this, a long-lived poller stays
-        blind (403 forever) and misses the release."""
+    async def _fresh_session(self, reason: str):
+        logger.warning(f"{reason} — starting a fresh session")
+        await self.close_session()
+        await self.start_session()
+
+    async def _get(self, url: str):
+        """GET for long-lived pollers. Rebuilds the session when the UI flipped
+        the shop route (it is pinned per session), and after a Cloudflare 403:
+        a flagged session stays challenged while a fresh one usually passes, so
+        without this a poller stays blind and misses the release."""
+        if self.via_origin != shop_via_origin_enabled():
+            await self._fresh_session("Shop mode changed")
+        response = await self.session.get(url)
         if response.status_code == 403:
-            logger.warning("Cloudflare 403 — starting a fresh session")
-            await self.close_session()
-            await self.start_session()
+            await self._fresh_session("Cloudflare 403")
+        return response
+
+    async def api_ticket_id(self, product_id: str) -> Optional[str]:
+        """Ticket ID of a visible product via the product API, None while hidden.
+        Raises on anything but 200/404 so an outage never reads as 'hidden'."""
+        r = await self.session.get(PRODUCT_API.format(product_id), headers=PRODUCT_API_HEADERS)
+        if r.status_code == 404:
+            self.last_ok = time.monotonic()
+            return None
+        if r.status_code != 200:
+            raise RuntimeError(f"product API returned {r.status_code}")
+        self.last_ok = time.monotonic()
+        sku = r.json().get("manufacturerSku") or ""
+        return sku.rsplit("-", 1)[-1] or None
 
     async def extract_event_details(self, product_url: str) -> Tuple[Optional[str], Optional[str], list]:
         """
@@ -84,14 +166,14 @@ class AudiTicketBot:
             logger.info(f"Extracting event details from: {product_url}")
             logger.info(f"Session object: {self.session}")
 
-            response = await self.session.get(product_url)
+            response = await self._get(product_url)
 
             logger.info(f"Response status: {response.status_code}, length: {len(response.text)}")
 
             if response.status_code != 200:
                 logger.error(f"Status {response.status_code} fetching product page")
-                await self._recycle_if_blocked(response)
                 return None, None, []
+            self.last_ok = time.monotonic()
 
             soup = BeautifulSoup(response.text, 'html.parser')
 
@@ -140,12 +222,13 @@ class AudiTicketBot:
         )
         
         try:
-            response = await self.session.get(url)
+            response = await self._get(url)
             
             logger.debug(f"[Availability] URL: {url}")
             logger.debug(f"[Availability] Status: {response.status_code}")
             
             if response.status_code == 200:
+                self.last_ok = time.monotonic()
                 # Log raw response (truncated for readability)
                 raw_text = response.text[:500] if len(response.text) > 500 else response.text
                 logger.debug(f"[Availability] Response: {raw_text}")
@@ -162,7 +245,6 @@ class AudiTicketBot:
                     logger.warning(f"[Availability] Could not parse response - pattern not found")
             else:
                 logger.warning(f"[Availability] Non-200 status: {response.status_code}")
-                await self._recycle_if_blocked(response)
                     
         except Exception as e:
             logger.error(f"[Availability] Error: {e}")

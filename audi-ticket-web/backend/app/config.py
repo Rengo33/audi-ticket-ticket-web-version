@@ -34,8 +34,15 @@ class Settings(BaseSettings):
     audi_base_url: str = "https://audidefuehrungen2.regiondo.de"
     audi_host: str = "audidefuehrungen2.regiondo.de"
 
+    # Route shop requests straight to the origin IPs, skipping Cloudflare.
+    # Cloudflare hard-blocks the server IP for hours at a time; the origins
+    # answer the same routes with 200. Off by default: the IPs are not a
+    # contract and can be pulled behind Cloudflare without notice.
+    shop_via_origin: bool = False
+    shop_origin_ips: str = "18.193.228.251,3.76.157.4,63.188.111.81"
+
     # Bot Settings
-    default_scan_interval: float = 1.0  # seconds
+    default_scan_interval: float = 10.0  # seconds; site is behind Cloudflare, don't go lower
     cart_hold_time: int = 1020  # 17 minutes in seconds
 
     # Auto-checkout: use pure-HTTP Stripe confirm path (no Chromium).

@@ -50,6 +50,16 @@ async def create_task(
     return task
 
 
+@router.get("/logs", response_model=List[TaskLogResponse])
+async def get_recent_logs(
+    limit: int = 200,
+    db: Session = Depends(get_db),
+    _: bool = Depends(get_current_user)
+):
+    """Latest logs across all tasks, so the Logs page has history after a reload."""
+    return db.query(TaskLog).order_by(TaskLog.id.desc()).limit(limit).all()
+
+
 @router.get("", response_model=TaskListResponse)
 async def list_tasks(
     skip: int = 0,

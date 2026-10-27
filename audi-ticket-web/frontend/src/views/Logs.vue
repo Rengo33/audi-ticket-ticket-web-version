@@ -2,7 +2,7 @@
   <div>
     <div class="view-head">
       <div>
-        <div class="eyebrow">REAL-TIME STREAM</div>
+        <div class="eyebrow">SAVED + LIVE</div>
         <h1 class="view-title">Logs <span class="count mono">{{ filteredLogs.length }}</span></h1>
       </div>
       <button @click="clearLogs()" class="btn btn-ghost" title="Clear client-side log buffer">
@@ -37,7 +37,7 @@
         <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 5h16M4 10h16M4 15h10M4 20h16"/></svg>
       </div>
       <h3>No logs yet</h3>
-      <p>Logs stream here in real-time when tasks are running.</p>
+      <p>Task logs appear here; new entries stream in live.</p>
     </div>
 
     <div v-else class="log-stream">
@@ -58,10 +58,25 @@
 </template>
 
 <script setup>
-import { ref, computed } from 'vue';
+import { ref, computed, onMounted } from 'vue';
 import { useLogStore } from '../stores/logs';
+import { api } from '../stores/api';
 
 const { logs, clear: clearLogs } = useLogStore();
+
+// The store only gets live WebSocket entries; load saved history so the page
+// isn't empty after a reload. Live entries that arrived meanwhile stay on top.
+onMounted(async () => {
+  try {
+    const saved = (await api.get('/api/tasks/logs?limit=200')).map(l => ({
+      task_id: l.task_id, level: l.level, message: l.message, timestamp: l.created_at,
+    }));
+    const seen = new Set(logs.value.map(l => `${l.task_id}|${l.message}`));
+    logs.value = [...logs.value, ...saved.filter(l => !seen.has(`${l.task_id}|${l.message}`))].slice(0, 200);
+  } catch (e) {
+    console.warn('Could not load saved logs', e);
+  }
+});
 const filterTask = ref(null);
 const filterLevel = ref('');
 

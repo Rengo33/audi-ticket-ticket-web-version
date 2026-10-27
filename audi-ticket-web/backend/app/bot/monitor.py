@@ -17,14 +17,16 @@ from sqlalchemy.orm import Session
 from ..models import Task, TaskStatus, CartSession, TaskLog
 from ..config import get_settings
 from ..database import SessionLocal
-from .core import AudiTicketBot, CookieData
-from .discord import send_discord_notification, send_discord_cart_success
+from .core import AudiTicketBot, CookieData, SiteBlocked, jitter
+from .discord import send_discord_notification, send_discord_cart_success, send_discord_blocked
 from .web_push import send_push
 
 logger = logging.getLogger(__name__)
 
-# How often a task for a not-yet-released product re-checks its public page.
+# Waiting for release: the product API (no Cloudflare) every ~10s, the shop page
+# (Cloudflare) only every ~60s as a fallback in case the API lags the flip.
 RELEASE_RECHECK_S = 10
+SHOP_FALLBACK_S = 60
 settings = get_settings()
 
 
@@ -103,6 +105,9 @@ class AvailabilityWatcher:
                     data = await self._bot.get_available_tickets(self.event_id, self.ticket_id)
                     self.scan_count += 1
                     _consecutive_errors = 0
+                    self._bot.raise_if_blocked()
+                except SiteBlocked:
+                    raise
 
                 except asyncio.CancelledError:
                     raise
@@ -198,7 +203,7 @@ class AvailabilityWatcher:
                 if data is None or (data and len(data) == 0):
                     await asyncio.sleep(5)
 
-                await asyncio.sleep(settings.default_scan_interval)
+                await asyncio.sleep(jitter(settings.default_scan_interval))
 
         except asyncio.CancelledError:
             raise
@@ -206,6 +211,9 @@ class AvailabilityWatcher:
             import traceback
             logger.error(f"[Watcher {self.key}] Fatal error after {_consecutive_errors} retries: {e}")
             logger.error(traceback.format_exc())
+            if isinstance(e, SiteBlocked):
+                await send_discord_blocked(
+                    f"Availability watcher for {self.product_url} ({len(self.subscribers)} tasks)", str(e))
             # Open a fresh session — the loop's `db` may be in a poisoned
             # transaction state, in which case _mark_failed silently no-ops
             # and the row stays in 'running' forever.
@@ -469,6 +477,9 @@ class TaskManager:
         self.task_data: Dict[int, dict] = {}
         self._ws_broadcast: Optional[Callable] = None
         self._watchers: Dict[str, AvailabilityWatcher] = {}  # key -> watcher
+        # Pre-release: one shared page poll per product URL, like the watcher.
+        self._release_polls: Dict[str, asyncio.Task] = {}
+        self._release_waiters: Dict[str, set] = {}  # product_url -> task ids
         self._task_watcher_map: Dict[int, str] = {}  # task_id -> watcher key
 
     def set_ws_broadcast(self, callback: Callable):
@@ -537,29 +548,31 @@ class TaskManager:
             async with AudiTicketBot() as bot:
                 await self._log(task_id, "info", f"Started monitoring: {product_url}", db)
 
-                event_id, ticket_id, categories = await bot.extract_event_details(product_url)
-
                 # Detector tasks for created-but-unreleased products point at
                 # /catalog/product/view/id/N, which redirects away until the
-                # product is publicly live. Wait for that instead of failing.
-                if (not event_id or not ticket_id) and "/catalog/product/view/id/" in product_url:
+                # product is publicly live. Those skip their own first fetch and
+                # go straight to the shared poll: N tasks restarting together
+                # would otherwise burst N requests and draw Cloudflare 403s.
+                event_id, ticket_id, categories = None, None, []
+                if "/catalog/product/view/id/" not in product_url:
+                    event_id, ticket_id, categories = await bot.extract_event_details(product_url)
+                else:
+                    waiters = self._release_waiters.setdefault(product_url, set())
+                    waiters.add(task_id)
                     await self._log(task_id, "info",
-                        f"Not released yet — checking every {RELEASE_RECHECK_S}s", db)
-                    checks = 0
-                    while not event_id or not ticket_id:
-                        await asyncio.sleep(RELEASE_RECHECK_S)
-                        event_id, ticket_id, categories = await bot.extract_event_details(product_url)
-                        # Count release checks as scans so the UI shows the task is alive.
-                        checks += 1
-                        now = datetime.utcnow()
-                        task = db.query(Task).filter(Task.id == task_id).first()
-                        if task:
-                            task.scan_count, task.last_scan_at = checks, now
-                            db.commit()
-                        await self.broadcast({"type": "scan_update", "data": {
-                            "task_id": task_id, "scan_count": checks,
-                            "tickets_available": 0, "last_scan_at": now.isoformat()}})
-                    await self._log(task_id, "info", "Product is live", db)
+                        f"Waiting for release — product API every ~{RELEASE_RECHECK_S}s, shop every ~{SHOP_FALLBACK_S}s "
+                        f"(shared with {len(waiters) - 1} other task(s))", db)
+                    if product_url not in self._release_polls:
+                        self._release_polls[product_url] = asyncio.create_task(
+                            self._poll_release(product_url))
+                    try:
+                        # shield: stopping this task must not cancel the others' poll
+                        event_id, ticket_id, categories = await asyncio.shield(
+                            self._release_polls[product_url])
+                    finally:
+                        waiters.discard(task_id)
+                    if event_id and ticket_id:
+                        await self._log(task_id, "info", "Product is live", db)
 
                 if not event_id or not ticket_id:
                     await self._log(task_id, "error", "Could not extract Event/Ticket ID", db)
@@ -616,6 +629,61 @@ class TaskManager:
             if not watcher.subscribers:
                 await watcher.stop()
             raise
+
+    async def _poll_release(self, product_url: str):
+        """Wait until a hidden product goes visible, for every task waiting on it.
+        Event ID = product ID and the ticket ID comes from the API's SKU, so no
+        shop page is needed; the shop page is only a slow fallback.
+        Returns (event_id, ticket_id, categories) once live, (None, None, [])
+        when no task waits any more. Raises SiteBlocked (and alerts) when
+        neither source answered for 10 min, so the waiting tasks stop."""
+        product_id = product_url.rstrip("/").rsplit("/", 1)[-1]
+        db = SessionLocal()
+        checks = 0
+        next_shop = time.monotonic() + jitter(SHOP_FALLBACK_S)
+        try:
+            async with AudiTicketBot() as bot:
+                while self._release_waiters.get(product_url):
+                    await asyncio.sleep(jitter(RELEASE_RECHECK_S))
+                    try:
+                        ticket_id = await bot.api_ticket_id(product_id)
+                    except Exception as e:
+                        logger.warning(f"[Release {product_id}] API check failed: {e}")
+                        ticket_id = None
+                    if ticket_id:
+                        logger.info(f"[Release {product_id}] visible in API, ticket {ticket_id}")
+                        return product_id, ticket_id, []
+                    if time.monotonic() >= next_shop:
+                        next_shop = time.monotonic() + jitter(SHOP_FALLBACK_S)
+                        event_id, ticket_id, categories = await bot.extract_event_details(product_url)
+                        if event_id and ticket_id:
+                            logger.info(f"[Release {product_id}] live on shop before API")
+                            return event_id, ticket_id, categories
+                    try:
+                        bot.raise_if_blocked()
+                    except SiteBlocked as e:
+                        await send_discord_blocked(
+                            f"Release wait for {product_url} "
+                            f"({len(self._release_waiters.get(product_url, ()))} tasks)", str(e))
+                        raise
+                    # Count release checks as scans so the UI shows the tasks are alive.
+                    checks += 1
+                    now = datetime.utcnow()
+                    ids = list(self._release_waiters.get(product_url, ()))
+                    if checks % 30 == 0:  # ~every 5 min, so the log shows the wait is alive
+                        for tid in ids:
+                            await self._log(tid, "info", f"Release check #{checks}: not live yet", db)
+                    db.query(Task).filter(Task.id.in_(ids)).update(
+                        {Task.scan_count: checks, Task.last_scan_at: now}, synchronize_session=False)
+                    db.commit()
+                    for tid in ids:
+                        await self.broadcast({"type": "scan_update", "data": {
+                            "task_id": tid, "scan_count": checks,
+                            "tickets_available": 0, "last_scan_at": now.isoformat()}})
+            return None, None, []
+        finally:
+            self._release_polls.pop(product_url, None)
+            db.close()
 
     async def stop_task(self, task_id: int, db: Session) -> bool:
         """Stop a running task."""
