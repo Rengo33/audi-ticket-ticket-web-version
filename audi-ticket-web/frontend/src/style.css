@@ -126,9 +126,15 @@
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
 
+/* Logged-in shell: only .stage scrolls. If the document itself scrolls (or
+   rubber-bands), the stage slides under the fixed rail and takes the sticky
+   page header with it. */
+html:has(.app[data-auth="in"]) { overflow: hidden; overscroll-behavior: none; }
+
 html, body {
   margin: 0;
   min-height: 100vh;
+  min-height: 100dvh;  /* 100vh is the toolbar-hidden height on iOS Safari, which left the page scrollable */
   background: var(--bg);
   color: var(--ink);
   font-family: var(--font-sans);
