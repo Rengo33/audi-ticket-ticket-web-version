@@ -218,6 +218,9 @@ class ReleaseDetector(Base):
     # listing path never starts a second task for the same product.
     frontier_id = Column(Integer, nullable=True)
     launched_ids = Column(Text, default="{}")
+    # Audi products found while still hidden, watched until the product API
+    # shows them, so Discord gets the release time ({id: {name, found}}).
+    awaiting_release = Column(Text, default="{}")
     scan_count = Column(Integer, default=0)
     last_scan_at = Column(DateTime, nullable=True)
     last_new_found_at = Column(DateTime, nullable=True)

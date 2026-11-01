@@ -3,7 +3,7 @@ Discord webhook notifications with rate-limit handling.
 """
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, Any, Optional
 
 from curl_cffi.requests import AsyncSession
@@ -169,6 +169,25 @@ async def send_discord_new_event(product_url: str, carted: bool, name: str = "",
             "🕵️ New event created (not released yet)" if unreleased else "🚨 New event detected!",
             0xDC052D,
             [_field("Product", label), _field("Action", status)],
+        )]
+    }
+    await send_discord_message(msg)
+
+
+async def send_discord_released(product_url: str, name: str, found_at: datetime):
+    """A product the detector found while hidden is now live in the product API.
+    Checked once per detector scan, so the release time is accurate to ~30s."""
+    mins = int((datetime.utcnow() - found_at).total_seconds() // 60)
+    hidden = f"{mins // 60} h {mins % 60} min" if mins >= 60 else f"{mins} min"
+    found = int(found_at.replace(tzinfo=timezone.utc).timestamp())
+    msg = {
+        "username": "Audi Ticket Bot",
+        "embeds": [_embed(
+            "✅ Released",
+            _COLOR_GREEN,
+            [_field("Product", f"[{name}]({product_url})"),
+             _field("Found hidden", f"<t:{found}:t>", inline=True),
+             _field("Live after", hidden, inline=True)],
         )]
     }
     await send_discord_message(msg)
