@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from ..database import get_db
 from ..auth import get_current_user
 from ..models import ReleaseDetector
-from ..bot.release_detector import release_detector
+from ..bot.release_detector import MIN_POLL_S, release_detector
 
 router = APIRouter(prefix="/detector", tags=["detector"])
 
@@ -89,7 +89,7 @@ async def start_detector(
     _: bool = Depends(get_current_user),
 ):
     cfg = _row(db)
-    cfg.poll_interval = max(150.0, data.poll_interval)  # Cloudflare
+    cfg.poll_interval = max(MIN_POLL_S, data.poll_interval)
     cfg.keyword = data.keyword.strip()
     cfg.quantity = data.quantity
     cfg.num_threads = data.num_threads

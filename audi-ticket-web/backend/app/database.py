@@ -113,6 +113,7 @@ def init_db():
     _add_column_if_missing("cart_sessions", "event_id", "VARCHAR(100)")
     _add_column_if_missing("release_detector", "frontier_id", "INTEGER")
     _add_column_if_missing("release_detector", "launched_ids", "TEXT DEFAULT '{}'")
+    _add_column_if_missing("release_detector", "awaiting_release", "TEXT DEFAULT '{}'")
 
     # Hot-path indexes — scheduler ticks every 30 s and the cart/log queries
     # filter on these columns on every dashboard render.

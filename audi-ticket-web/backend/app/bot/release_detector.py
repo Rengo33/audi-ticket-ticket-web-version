@@ -15,12 +15,14 @@ import logging
 import time
 from datetime import datetime
 
+from curl_cffi.requests import AsyncSession
+
 from ..database import SessionLocal
 from ..models import Task, ReleaseDetector
 from .scraper import get_listing_products, widget_lookup, product_view_url
 from .monitor import task_manager
-from .core import BLOCKED_GIVE_UP_S, jitter
-from .discord import send_discord_new_event, send_discord_blocked
+from .core import BLOCKED_GIVE_UP_S, PRODUCT_API, PRODUCT_API_HEADERS, jitter
+from .discord import send_discord_new_event, send_discord_blocked, send_discord_released
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +36,12 @@ FRONTIER_LOOKAHEAD = 2
 # next scan walks across it.
 GAP_PROBE_EVERY = 6
 GAP_PROBES = (5, 10, 20, 40)
+# A hidden product not live after this long is a draft that never ships (e.g.
+# "TEST DFB"); stop asking the product API about it.
+RELEASE_WATCH_DAYS = 30
+# Scans hit regiondo.net (no Cloudflare); the shop host is only the fallback
+# when regiondo.net misbehaves, so 30s keeps the server IP calm.
+MIN_POLL_S = 30.0
 AUDI_VENDOR = "AUDI AG"  # exact: substring would hit e.g. "Via Claudia Augusta"
 
 
@@ -122,9 +130,7 @@ class ReleaseDetectorManager:
         cfg = self._get_cfg(db)
         if not cfg.active:
             raise StopAsyncIteration
-        # Every widget scan hits Cloudflare. Games are created hours to days
-        # before release, so ~2.5 min loses nothing and keeps the IP calm.
-        interval = jitter(max(150.0, cfg.poll_interval or 150.0))
+        interval = jitter(max(MIN_POLL_S, cfg.poll_interval or MIN_POLL_S))
 
         start_id = None
         if cfg.frontier_id is None:
@@ -145,6 +151,7 @@ class ReleaseDetectorManager:
         cfg.error_message = None
 
         acted = await self._scan_frontier(cfg, start_id)
+        await self._check_releases(cfg)
         down = time.monotonic() - self._last_ok
         if down > BLOCKED_GIVE_UP_S:
             # Site stopped answering (Cloudflare): switch off instead of burning the IP.
@@ -184,6 +191,7 @@ class ReleaseDetectorManager:
         if fid is None:
             return []
         launched = json.loads(cfg.launched_ids or "{}")
+        awaiting = json.loads(cfg.awaiting_release or "{}")
         acted, pid, misses, start = [], fid + 1, 0, fid
         allowed = FRONTIER_LOOKAHEAD + self._gap_skip
         self._scans += 1
@@ -201,6 +209,7 @@ class ReleaseDetectorManager:
                         tid = await self._act(url, cfg, _matches(_slug(name), cfg.keyword),
                                               name=name, unreleased=True)
                         launched[str(pid)] = name
+                        awaiting[str(pid)] = {"name": name, "found": datetime.utcnow().isoformat()}
                         if tid is not None:
                             acted.append({"url": url, "name": name,
                                           "at": datetime.utcnow().isoformat(), "task_id": tid})
@@ -219,13 +228,39 @@ class ReleaseDetectorManager:
             logger.warning(f"[Detector] frontier scan stopped at {pid}: {e}")
         cfg.frontier_id = fid
         cfg.launched_ids = json.dumps(launched, sort_keys=True)
+        cfg.awaiting_release = json.dumps(awaiting, sort_keys=True)
         return acted
+
+    async def _check_releases(self, cfg: ReleaseDetector):
+        """Ask the product API (no Cloudflare) whether a product found hidden has
+        gone live, and ping Discord with how long it stayed hidden. Runs right
+        after the frontier scan, so a product that was already live when found
+        gets its ping in the same scan."""
+        awaiting = json.loads(cfg.awaiting_release or "{}")
+        if not awaiting:
+            return
+        now = datetime.utcnow()
+        async with AsyncSession(impersonate="safari17_2_ios", timeout=15) as s:
+            for pid, info in list(awaiting.items()):
+                found = datetime.fromisoformat(info["found"])
+                try:
+                    r = await s.get(PRODUCT_API.format(pid), headers=PRODUCT_API_HEADERS)
+                except Exception as e:
+                    logger.warning(f"[Detector] release check {pid} failed: {e}")
+                    break
+                if r.status_code == 200:
+                    logger.info(f"[Detector] {pid} released {info['name']!r}")
+                    del awaiting[pid]
+                    await send_discord_released(product_view_url(int(pid)), info["name"], found)
+                elif (now - found).days > RELEASE_WATCH_DAYS:
+                    del awaiting[pid]
+        cfg.awaiting_release = json.dumps(awaiting, sort_keys=True)
 
     async def _loop(self):
         logger.info("[Detector] loop started")
         try:
             while True:
-                interval = 150.0
+                interval = MIN_POLL_S
                 db = SessionLocal()
                 try:
                     interval = await self._scan_once(db)
