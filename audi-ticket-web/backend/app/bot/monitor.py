@@ -522,6 +522,7 @@ class TaskManager:
         # Update task status
         task.status = TaskStatus.RUNNING.value
         task.started_at = datetime.utcnow()
+        task.error_message = None  # a restart starts clean; old errors stay in the log
         db.commit()
 
         price_category = task.price_category or 0
