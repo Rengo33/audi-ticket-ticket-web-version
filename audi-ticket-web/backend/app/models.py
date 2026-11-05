@@ -154,6 +154,7 @@ class BillingProfile(Base):
     telephone = Column(String(50), nullable=False)
     stammnummer = Column(String(100), nullable=False)  # Audi employee number / buyer_field_5
     department = Column(String(200), default="")  # buyer_field_19900
+    fcb_app_email = Column(String(200), default="")  # "FC Bayern App E-Mail Account" (Bayern games)
 
     # Invoice address (always required for Rechnung)
     invoice_recipient = Column(String(200), default="")
