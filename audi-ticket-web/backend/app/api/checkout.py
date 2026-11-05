@@ -110,13 +110,20 @@ def rewrite_html_for_proxy(html: str, token: str) -> str:
 
 
 def _rewrite_json_html(body: str, token: str) -> str:
-    """Walk the JSON body and rewrite any embedded HTML fragment."""
+    """Rewrite the JSON body's embedded HTML fragment and any top-level shop
+    URL, e.g. verifyPayment's `redirect` to the order-success page: followed
+    raw, the browser lands on the shop without the cart cookie and the
+    confirmation (with the invoice link) is lost."""
     try:
         data = json.loads(body)
     except Exception:
         return body.replace("https:\\/\\/audidefuehrungen2.regiondo.de\\/", f"/checkout/{token}/proxy/")
-    if isinstance(data, dict) and isinstance(data.get("html"), str):
-        data["html"] = rewrite_html_for_proxy(data["html"], token)
+    if isinstance(data, dict):
+        for k, v in data.items():
+            if k == "html" and isinstance(v, str):
+                data[k] = rewrite_html_for_proxy(v, token)
+            elif isinstance(v, str) and v.startswith(settings.audi_base_url + "/"):
+                data[k] = f"/checkout/{token}/proxy/" + v[len(settings.audi_base_url) + 1:]
     return json.dumps(data)
 
 
