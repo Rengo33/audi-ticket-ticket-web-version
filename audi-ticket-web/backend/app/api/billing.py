@@ -22,6 +22,7 @@ class BillingProfileCreate(BaseModel):
     telephone: str
     stammnummer: str
     department: str = ""
+    fcb_app_email: str = ""
     invoice_recipient: str = ""
     invoice_company: str = ""
     invoice_tax_id: str = ""
@@ -44,6 +45,7 @@ class BillingProfileResponse(BaseModel):
     telephone: str
     stammnummer: str
     department: str
+    fcb_app_email: str
     invoice_recipient: str
     invoice_company: str
     invoice_tax_id: str
@@ -68,6 +70,7 @@ def _to_response(profile: BillingProfile) -> BillingProfileResponse:
         telephone=profile.telephone,
         stammnummer=profile.stammnummer,
         department=profile.department or "",
+        fcb_app_email=profile.fcb_app_email or "",
         invoice_recipient=profile.invoice_recipient or "",
         invoice_company=profile.invoice_company or "",
         invoice_tax_id=profile.invoice_tax_id or "",
@@ -103,6 +106,7 @@ async def create_profile(
         telephone=data.telephone,
         stammnummer=data.stammnummer,
         department=data.department,
+        fcb_app_email=data.fcb_app_email,
         invoice_recipient=data.invoice_recipient,
         invoice_company=data.invoice_company,
         invoice_tax_id=data.invoice_tax_id,
@@ -140,6 +144,7 @@ async def update_profile(
     profile.telephone = data.telephone
     profile.stammnummer = data.stammnummer
     profile.department = data.department
+    profile.fcb_app_email = data.fcb_app_email
     profile.invoice_recipient = data.invoice_recipient
     profile.invoice_company = data.invoice_company
     profile.invoice_tax_id = data.invoice_tax_id

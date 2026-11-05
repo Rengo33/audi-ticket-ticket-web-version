@@ -114,6 +114,7 @@ def init_db():
     _add_column_if_missing("release_detector", "frontier_id", "INTEGER")
     _add_column_if_missing("release_detector", "launched_ids", "TEXT DEFAULT '{}'")
     _add_column_if_missing("release_detector", "awaiting_release", "TEXT DEFAULT '{}'")
+    _add_column_if_missing("billing_profiles", "fcb_app_email", "VARCHAR(200) DEFAULT ''")
 
     # Hot-path indexes — scheduler ticks every 30 s and the cart/log queries
     # filter on these columns on every dashboard render.

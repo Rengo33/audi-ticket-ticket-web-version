@@ -93,6 +93,7 @@
               <div class="field"><label class="field-label">Stammnr. <span class="req">*</span></label><input v-model="form.stammnummer" inputmode="numeric"></div>
               <div class="field"><label class="field-label">Dept.</label><input v-model="form.department" placeholder="Optional"></div>
             </div>
+            <div class="field"><label class="field-label">FC Bayern App email</label><input v-model="form.fcb_app_email" type="email" inputmode="email" placeholder="Optional, Bayern games"></div>
           </div>
 
           <div class="form-section">
@@ -146,7 +147,7 @@ const saving = ref(false);
 const editingId = ref(null);
 const emptyForm = {
   name: '', firstname: '', lastname: '', email: '', telephone: '',
-  stammnummer: '', department: '',
+  stammnummer: '', department: '', fcb_app_email: '',
   invoice_recipient: '', invoice_company: '', invoice_tax_id: '',
   invoice_street: '', invoice_postcode: '', invoice_city: '', invoice_country: 'DE',
   card_number: '', card_exp_month: '', card_exp_year: '', card_cvc: ''
@@ -164,7 +165,7 @@ const editProfile = (p) => {
   form.value = {
     name: p.name, firstname: p.firstname, lastname: p.lastname,
     email: p.email, telephone: p.telephone,
-    stammnummer: p.stammnummer, department: p.department || '',
+    stammnummer: p.stammnummer, department: p.department || '', fcb_app_email: p.fcb_app_email || '',
     invoice_recipient: p.invoice_recipient || '', invoice_company: p.invoice_company || '',
     invoice_tax_id: p.invoice_tax_id || '', invoice_street: p.invoice_street || '',
     invoice_postcode: p.invoice_postcode || '', invoice_city: p.invoice_city || '',

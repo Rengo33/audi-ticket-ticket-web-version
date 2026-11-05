@@ -98,7 +98,7 @@ _LABEL_RE = re.compile(r'<label[^>]*>([^<]{1,120})</label>')
 def _discover_buyer_fields(html: str) -> dict[str, str]:
     """Return {purpose: buyer_field_N} for the buyer fields on the form.
 
-    purpose is one of: "stammnummer", "department", "gesellschaft". Only keys
+    purpose is one of: "stammnummer", "department", "gesellschaft", "fcb_app_email". Only keys
     for fields actually present on the page are included.
     """
     found: dict[str, str] = {}
@@ -117,6 +117,8 @@ def _discover_buyer_fields(html: str) -> dict[str, str]:
             found["department"] = field_id
         elif "berechtigt" in hint and "gesellschaft" not in found:
             found["gesellschaft"] = field_id
+        elif "fc bayern app" in hint and "fcb_app_email" not in found:
+            found["fcb_app_email"] = field_id
     return found
 
 
@@ -199,6 +201,8 @@ class AutoCheckout:
                 form_data[f"custom_field[buyer][{fid}]"] = profile.department or ""
             if fid := buyer_fields.get("gesellschaft"):
                 form_data[f"custom_field[buyer][{fid}]"] = BERECHTIGTE_GESELLSCHAFT_AUDI_AG
+            if fid := buyer_fields.get("fcb_app_email"):
+                form_data[f"custom_field[buyer][{fid}]"] = profile.fcb_app_email or ""
 
             r = await self.session.post(
                 f"{AUDI_BASE}/checkoutsimple/threestep/posteditaddress",
