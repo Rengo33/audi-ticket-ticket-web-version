@@ -7,6 +7,7 @@ import json
 import re
 import logging
 import random
+import socket
 import time
 from typing import Optional, Tuple, Dict, Any, Callable
 from datetime import datetime
@@ -38,8 +39,25 @@ def jitter(seconds: float) -> float:
     return seconds * random.uniform(0.7, 1.3)
 
 
+# The shop origin sits behind the same AWS load balancer as regiondo.net, whose
+# IPs rotate: the hardcoded list went dead on 2026-11-05 and Bypass timed out.
+_ORIGIN_HOST = "regiondo.net"
+_origin_cache: Tuple[float, list] = (0.0, [])
+
+
 def shop_origin_ips() -> list:
-    return [ip.strip() for ip in get_settings().shop_origin_ips.split(",") if ip.strip()]
+    """regiondo.net's current A records, cached 5 min. Falls back to the
+    configured list only if DNS fails."""
+    global _origin_cache
+    at, ips = _origin_cache
+    if not ips or time.monotonic() - at > 300:
+        try:
+            ips = sorted({a[4][0] for a in socket.getaddrinfo(_ORIGIN_HOST, 443, socket.AF_INET, socket.SOCK_STREAM)})
+        except OSError as e:
+            logger.warning(f"[Origin] DNS for {_ORIGIN_HOST} failed: {e}")
+            ips = ips or [ip.strip() for ip in get_settings().shop_origin_ips.split(",") if ip.strip()]
+        _origin_cache = (time.monotonic(), ips)
+    return ips
 
 
 # Live origin-route switch. Seeded from the app_settings row at startup and set
