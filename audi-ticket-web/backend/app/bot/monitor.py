@@ -25,9 +25,9 @@ from .scraper import widget_product
 logger = logging.getLogger(__name__)
 
 # Waiting for release: the shop's own product record via the widget route (no
-# Cloudflare) every ~10s, every ~3s once Audi has edited the hidden product
-# (edits come shortly before a release), the shop page (Cloudflare) only every
-# ~60s as a last fallback.
+# Cloudflare) every ~10s, every ~3s once Audi has edited or enabled the hidden
+# product (that comes shortly before a release), the shop page (Cloudflare)
+# only every ~60s as a fallback while the widget route is down.
 RELEASE_RECHECK_S = 10
 RELEASE_FAST_S = 3
 SHOP_FALLBACK_S = 60
@@ -637,9 +637,10 @@ class TaskManager:
 
     async def _poll_release(self, product_url: str):
         """Wait until a hidden product goes live, for every task waiting on it.
-        Event ID = product ID and the ticket ID comes from the widget record
-        (`status` "1" = live), so no shop page is needed. The product API
-        covers a widget-route failure; the shop page is only a slow fallback.
+        Live = the widget record says `status` "1" AND the product API answers
+        200 (Audi briefly enables placeholders, which the API never shows).
+        Event ID = product ID, the ticket ID comes from the API's SKU. The
+        shop page is only a slow fallback while the widget route is down.
         Returns (event_id, ticket_id, categories) once live, (None, None, [])
         when no task waits any more. Raises SiteBlocked (and alerts) when
         neither source answered for 10 min, so the waiting tasks stop."""
@@ -652,20 +653,27 @@ class TaskManager:
             async with AudiTicketBot() as bot:
                 while self._release_waiters.get(product_url):
                     await asyncio.sleep(jitter(RELEASE_FAST_S if fast else RELEASE_RECHECK_S))
-                    ticket_id = None
+                    ticket_id, widget_ok = None, False
                     try:
                         rec = await widget_product(product_id)
                         bot.last_ok = time.monotonic()
-                        if rec and rec.get("status") == "1":
-                            ticket_id = rec.get("ticket_id")
-                        elif rec:
-                            if seen_update is None:
-                                seen_update = rec.get("updated_at")
-                            elif rec.get("updated_at") != seen_update and not fast:
+                        widget_ok = True
+                        if rec:
+                            # Audi sometimes enables a product for a few seconds (a
+                            # placeholder page) and hides it again, so status "1" is
+                            # no release on its own: it speeds the checks up, and the
+                            # product API (200 only once public) confirms.
+                            edited = seen_update is not None and rec.get("updated_at") != seen_update
+                            seen_update = seen_update or rec.get("updated_at")
+                            enabled = rec.get("status") == "1"
+                            if (enabled or edited) and not fast:
                                 fast = True
+                                what = "enabled the product" if enabled else "edited the hidden product"
                                 for tid in list(self._release_waiters.get(product_url, ())):
                                     await self._log(tid, "info",
-                                        f"Audi edited the hidden product — checking every ~{RELEASE_FAST_S}s", db)
+                                        f"Audi {what} — checking every ~{RELEASE_FAST_S}s until it is public", db)
+                            if enabled:
+                                ticket_id = await bot.api_ticket_id(product_id)
                     except Exception as e:
                         logger.warning(f"[Release {product_id}] widget check failed: {e}")
                         try:
@@ -675,7 +683,9 @@ class TaskManager:
                     if ticket_id:
                         logger.info(f"[Release {product_id}] live, ticket {ticket_id}")
                         return product_id, ticket_id, []
-                    if time.monotonic() >= next_shop:
+                    # Shop page only while the widget route is down: a placeholder
+                    # page renders like a live one.
+                    if not widget_ok and time.monotonic() >= next_shop:
                         next_shop = time.monotonic() + jitter(SHOP_FALLBACK_S)
                         event_id, ticket_id, categories = await bot.extract_event_details(product_url)
                         if event_id and ticket_id:
