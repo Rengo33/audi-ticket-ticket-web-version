@@ -364,6 +364,20 @@ TIMESLOTS_URL = PRODUCT_API.rsplit("/", 2)[0] + "/timeslots/times?productId={}&n
 TIMESLOTS_HEADERS = {**PRODUCT_API_HEADERS, "x-partner-domain": "https://audidefuehrungen2.regiondo.de"}
 
 
+async def option_ids(pid) -> Dict[str, str]:
+    """{variation id: option id} for every category, hidden products included.
+    Takes each category's first option, the same row the shop's options call
+    lists first (core.get_option_number), i.e. the full-price ticket."""
+    global _widget_session
+    if _widget_session is None:
+        _widget_session = AsyncSession(impersonate="safari17_2_ios", timeout=15)
+    r = await _widget_session.get(CATEGORIES_URL.format(pid))
+    if r.status_code != 200:
+        raise RuntimeError(f"categories {pid} returned {r.status_code}")
+    return {str(c["variation_id"]): str(c["options"][0]["option_id"])
+            for c in r.json().get("variations") or [] if c.get("options")}
+
+
 async def category_stock(pid) -> List[Dict[str, Any]]:
     """Tickets left per category, e.g. [{"title": "Block 237 - Kategorie 3",
     "available": 24, "capacity": 180}, ...], in the shop's category order.

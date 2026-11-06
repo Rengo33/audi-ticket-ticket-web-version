@@ -20,7 +20,7 @@ from ..database import SessionLocal
 from .core import AudiTicketBot, CookieData, SiteBlocked, cart_via_regiondo_enabled, jitter
 from .discord import send_discord_notification, send_discord_cart_success, send_discord_blocked
 from .web_push import send_push
-from .scraper import category_stock, widget_product
+from .scraper import category_stock, option_ids, widget_product
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +62,9 @@ class AvailabilityWatcher:
         self._bot: Optional[AudiTicketBot] = None
         self.scan_count = 0
         self._last_discord_data = None
-        self._option_cache: Dict[str, str] = {}  # (variation,date,time) -> option_number
+        # variation id -> option id. Option IDs don't depend on date/time, and
+        # they are filled before stock opens, so the add-to-cart skips the lookup.
+        self._option_cache: Dict[str, str] = {}
         self._last_broadcast = 0.0
 
     @property
@@ -103,6 +105,7 @@ class AvailabilityWatcher:
         try:
             self._bot = AudiTicketBot()
             await self._bot.start_session()
+            await self._prefill_options()
 
             while self.subscribers:
                 try:
@@ -235,6 +238,16 @@ class AvailabilityWatcher:
             db.close()
             self.manager._remove_watcher(self.key)
 
+    async def _prefill_options(self):
+        """Fetch every category's option ID up front (readable before the sale,
+        even for hidden products), so the add-to-cart at release doesn't wait
+        for an option lookup. On failure the lookup at release still runs."""
+        try:
+            self._option_cache.update(await option_ids(self.event_id))
+            logger.info(f"[Watcher {self.key}] option IDs ready: {self._option_cache}")
+        except Exception as e:
+            logger.warning(f"[Watcher {self.key}] option prefetch failed, will look up at release: {e}")
+
     async def _notify_stock(self, data: dict):
         """Discord stock alert with tickets left per category. Runs as its own
         task, so the extra lookups never delay the add-to-cart."""
@@ -296,7 +309,7 @@ class AvailabilityWatcher:
                         return
                     variation = variations[sub.price_category]
 
-                    cache_key = f"{variation}:{date}:{time_encoded}"
+                    cache_key = str(variation)
                     option_number = self._option_cache.get(cache_key)
                     if not option_number:
                         option_number = await self._bot.get_option_number(
