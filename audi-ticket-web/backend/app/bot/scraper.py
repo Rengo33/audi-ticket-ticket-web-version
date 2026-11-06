@@ -1,6 +1,6 @@
 """
-FC Bayern Munich game scraper for Audi ticket website.
-Scrapes upcoming games and their sale dates.
+FC Bayern games (from Regiondo's product API) plus the shop listing and
+booking-widget lookups the release detector uses.
 """
 import asyncio
 import re
@@ -9,11 +9,12 @@ import logging
 from datetime import datetime, date
 from typing import Optional, List, Dict, Any, Tuple
 from dataclasses import dataclass, asdict
+from zoneinfo import ZoneInfo
 
 from curl_cffi.requests import AsyncSession
 from bs4 import BeautifulSoup
 
-from .core import shop_curl_options
+from .core import PRODUCT_API, PRODUCT_API_HEADERS, shop_curl_options
 
 logger = logging.getLogger(__name__)
 
@@ -45,275 +46,144 @@ class BayernGame:
         return d
 
 
-class BayernScraper:
-    """Scraper for FC Bayern games on Audi ticket website."""
-    
-    BASE_URL = "https://audidefuehrungen2.regiondo.de"
-    
-    def __init__(self):
-        self.session: Optional[AsyncSession] = None
-    
-    async def __aenter__(self):
-        self.session = AsyncSession(impersonate="safari17_2_ios", curl_options=shop_curl_options())
-        return self
-    
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        if self.session:
-            await self.session.close()
-    
-    async def get_all_games(self, location_filter: Optional[str] = "Ingolstadt") -> List[BayernGame]:
-        """Scrape all FC Bayern games from the website.
-        
-        Args:
-            location_filter: Only return games at this location (e.g., "Ingolstadt"). 
-                           Set to None to return all locations.
-        """
-        games = []
-        found: Dict[str, Optional[str]] = {}  # url -> title from the listing, if usable
+# Games come from Regiondo's product API (no Cloudflare) instead of scraping
+# /kategorien + every product page through the shop host, which Cloudflare
+# 403s from the server IP for hours ("Page 1 returned 403" -> 0 games).
+PRODUCT_LIST = PRODUCT_API.rsplit("/", 1)[0]
+DATES_URL = ("https://regiondo.net/product/catalog_ajax/dates/id/{}/"
+             "?___store=wl_de&ticket_id={}&availabilityType=starttime")
+# Case-insensitive: the shop switched the product titles to all caps
+# ("FC BAYERN MÜNCHEN - RB LEIPZIG (Ingolstadt)").
+_TITLE_RE = re.compile(r"FC Bayern München\s*[-–]\s*(.+?)\s*\((\w+)\)", re.I)
+# Description line: "Freitag, 20.11.2026 | Anstoß: 20:30 Uhr"
+_KICKOFF_RE = re.compile(r"(\d{1,2})\.(\d{1,2})\.(\d{4})\s*\|\s*Ansto\S*\s*(\d{1,2}:\d{2})")
+# First "1. Oktober 2026" after VERKAUFSSTART; the words in between vary
+# ("VERKAUFSSTART GEPLANT FÜR: DONNERSTAG, 01. OKTOBER 2026").
+_SALE_RE = re.compile(r"VERKAUFSSTART[^<]{0,60}?(\d{1,2})\.\s*([A-Za-zÄÖÜäöü]+)\s+(\d{4})", re.I)
+_PRICE_RE = re.compile(r"(Kategorie\s+\d+\s*-\s*Block\s+\d+):\s*([\d,.]+)\s*Euro")
+_MONTHS = {
+    "januar": 1, "februar": 2, "märz": 3, "maerz": 3, "april": 4, "mai": 5,
+    "juni": 6, "juli": 7, "august": 8, "september": 9, "oktober": 10,
+    "november": 11, "dezember": 12,
+}
 
+
+async def _api_products(s: AsyncSession, include_inactive: bool) -> list:
+    url = f"{PRODUCT_LIST}?limit=250" + ("&includeInactive=true" if include_inactive else "")
+    r = await s.get(url, headers=PRODUCT_API_HEADERS)
+    if r.status_code != 200:
+        raise RuntimeError(f"product API list returned {r.status_code}")
+    return r.json().get("items", [])
+
+
+async def _stock(s: AsyncSession, pid: str) -> Optional[int]:
+    """Tickets left right now: ticket id from the API's SKU, stock from
+    catalog_ajax/dates on regiondo.net (same data as the shop, no Cloudflare).
+    None when either step fails."""
+    r = await s.get(PRODUCT_API.format(pid), headers=PRODUCT_API_HEADERS)
+    if r.status_code != 200:
+        return None
+    ticket_id = (r.json().get("manufacturerSku") or "").rsplit("-", 1)[-1]
+    if not ticket_id:
+        return None
+    r = await s.get(DATES_URL.format(pid, ticket_id))
+    m = re.search(r"ticket\.setAvailableDateTimes\((\{.*?\})\);", r.text, re.S)
+    if r.status_code != 200 or not m:
+        return None
+    return sum(max(0, t.get("qty_available", 0)) for ts in json.loads(m.group(1)).values() for t in ts)
+
+
+def _parse_game(item: dict) -> BayernGame:
+    """Build a game from one product-list item (title + description only)."""
+    pid, title = str(item["id"]), item.get("title") or ""
+    desc = item.get("description") or ""
+    text = re.sub(r"<[^>]+>", " ", desc)
+
+    m = _TITLE_RE.search(title)
+    opponent = m.group(1).strip() if m else re.sub(r"(?i)fc bayern münchen", "", title).strip(" -–")
+    location = m.group(2).strip() if m else ""
+
+    match_date = match_time = None
+    k = _KICKOFF_RE.search(text)
+    if k:
         try:
-            def collect(html: str):
-                """Pull fc-bayern product links plus their listing title out of one page."""
-                for link in BeautifulSoup(html, 'html.parser').find_all('a', href=True):
-                    href = link['href']
-                    if 'fc-bayern' in href.lower() and href not in found:
-                        title = link.get_text(strip=True)
-                        if not title or len(title) < 5 or 'fc bayern' not in title.lower():
-                            title = None  # fall back to the title on the detail page
-                        found[href] = title
+            match_date = date(int(k.group(3)), int(k.group(2)), int(k.group(1)))
+            match_time = k.group(4).zfill(5)
+        except ValueError:
+            pass
 
-            # Page 1 tells us how many pages there are, so the rest can be fetched
-            # together instead of one-by-one with a sleep in between.
-            page_url = lambda p: f"{self.BASE_URL}/kategorien?___store=wl_de&p={p}"
-            first = await self.session.get(page_url(1))
-            if first.status_code != 200:
-                logger.warning(f"Page 1 returned {first.status_code}")
-                return games
-            collect(first.text)
-
-            last_page = max(
-                (int(n) for n in re.findall(r'[?&;]p=(\d{1,2})"', first.text)),
-                default=1,
-            )
-            if last_page > 1:
-                rest = await asyncio.gather(
-                    *(self.session.get(page_url(p)) for p in range(2, min(last_page, 9) + 1)),
-                    return_exceptions=True,
-                )
-                for p, response in enumerate(rest, start=2):
-                    if isinstance(response, Exception):
-                        logger.warning(f"Page {p} failed: {response}")
-                        continue
-                    if response.status_code != 200:
-                        logger.warning(f"Page {p} returned {response.status_code}")
-                        continue
-                    collect(response.text)
-
-            # One detail fetch per game, all in flight at once — 4 games turn
-            # ~12s of sequential requests into roughly one round trip.
-            results = await asyncio.gather(
-                *(self._get_game_details(u, t) for u, t in found.items()),
-                return_exceptions=True,
-            )
-            for game in results:
-                if isinstance(game, Exception):
-                    logger.error(f"Error getting game details: {game}")
-                    continue
-                if not game:
-                    continue
-                if location_filter and game.location.lower() != location_filter.lower():
-                    continue
-                games.append(game)
-
-        except Exception as e:
-            logger.error(f"Error scraping games: {e}")
-
-        logger.info(f"Found {len(games)} FC Bayern games (location: {location_filter or 'all'})")
-        return games
-    
-    async def _get_game_details(self, url: str, title: Optional[str] = None) -> Optional[BayernGame]:
-        """Get detailed information about a specific game."""
+    sale_date = None
+    sm = _SALE_RE.search(desc)
+    if sm and sm.group(2).lower() in _MONTHS:
         try:
-            response = await self.session.get(url)
-            
-            if response.status_code != 200:
-                return None
-            
-            html = response.text
-            soup = BeautifulSoup(html, 'html.parser')
-            
-            # Generate ID from URL
-            game_id = url.split('/')[-1]
-            
-            # Get title from page if not provided
-            if not title:
-                # Try h1 first
-                h1 = soup.find('h1')
-                if h1:
-                    title = h1.get_text(strip=True)
-                else:
-                    # Try meta title
-                    meta_title = soup.find('meta', property='og:title')
-                    if meta_title:
-                        title = meta_title.get('content', '')
-                
-                if not title:
-                    title = game_id.replace('-', ' ').title()
-            
-            # Parse opponent and location from title
-            # Format: "FC Bayern München - Opponent (Location)"
-            opponent = ""
-            location = ""
-            
-            # Case-insensitive: the shop switched the product titles to all caps
-            # ("FC BAYERN MÜNCHEN - RB LEIPZIG (Ingolstadt)").
-            match = re.search(r'FC Bayern München\s*-\s*(.+?)\s*\((\w+)\)', title, re.IGNORECASE)
-            if match:
-                opponent = match.group(1).strip()
-                location = match.group(2).strip()
-            else:
-                opponent = title.replace("FC Bayern München", "").strip(" -")
-            
-            # Parse match date from schema.org JSON-LD
-            match_date = None
-            match_time = None
-            
-            schema_match = re.search(r'"startDate"\s*:\s*"([^"]+)"', html)
-            if schema_match:
-                try:
-                    dt = datetime.fromisoformat(schema_match.group(1).replace('+00:00', ''))
-                    match_date = dt.date()
-                    match_time = dt.strftime("%H:%M")
-                except:
-                    pass
-            
-            # Parse sale date from VERKAUFSSTART
-            sale_date = None
-            # Take the first "1. Oktober 2026" after VERKAUFSSTART; the words in
-            # between vary ("VERKAUFSSTART GEPLANT FÜR: DONNERSTAG, 01. OKTOBER 2026",
-            # "VERKAUFSSTART: MONTAG, 5. MAI 2026").
-            sale_match = re.search(r'VERKAUFSSTART[^<]{0,60}?(\d{1,2})\.\s*([A-Za-zÄÖÜäöü]+)\s+(\d{4})', html, re.IGNORECASE)
-            if sale_match:
-                day = int(sale_match.group(1))
-                month_name = sale_match.group(2).lower()
-                year = int(sale_match.group(3))
-                
-                # German month names
-                months = {
-                    'januar': 1, 'februar': 2, 'märz': 3, 'maerz': 3,
-                    'april': 4, 'mai': 5, 'juni': 6, 'juli': 7,
-                    'august': 8, 'september': 9, 'oktober': 10,
-                    'november': 11, 'dezember': 12
-                }
-                
-                month = months.get(month_name, 1)
-                sale_date = date(year, month, day)
-            
-            # Extract main product image (team matchup image)
-            image_url = None
-            for img in soup.find_all('img'):
-                src = img.get('src', '')
-                if 'catalog/product' in src and '600x400' in src:
-                    image_url = src
-                    break
-            
-            # Determine status
-            status = "upcoming"
-            is_available = False
-            today = date.today()
-            page_says_sold_out = 'ausverkauft' in html.lower() or 'sold out' in html.lower()
+            sale_date = date(int(sm.group(3)), _MONTHS[sm.group(2).lower()], int(sm.group(1)))
+        except ValueError:
+            pass
 
-            # Check if sale has actually started (7:00 AM German time)
-            from datetime import datetime as dt
-            from zoneinfo import ZoneInfo
-            now_german = dt.now(ZoneInfo("Europe/Berlin"))
-            sale_started = False
-            if sale_date:
-                sale_datetime = dt(sale_date.year, sale_date.month, sale_date.day, 7, 0, tzinfo=ZoneInfo("Europe/Berlin"))
-                sale_started = now_german >= sale_datetime
+    prices, seen = [], set()
+    for name, price in _PRICE_RE.findall(desc):
+        if name not in seen:
+            seen.add(name)
+            prices.append({"name": name.strip(), "price": float(price.replace(",", "."))})
 
-            if sale_date and sale_started and page_says_sold_out:
-                status = "sold_out"
-            elif not sale_date and page_says_sold_out:
-                status = "sold_out"
-            elif sale_date and sale_started:
-                is_available = await self._check_availability(soup)
-                status = "on_sale"
-
-            # Extract price categories (e.g. "Kategorie 1 - Block 136: 80,00 Euro")
-            price_categories = []
-            seen = set()
-            for cat_match in re.finditer(r'(Kategorie\s+\d+\s*-\s*Block\s+\d+):\s*([\d,.]+)\s*Euro', html):
-                name = cat_match.group(1).strip()
-                if name not in seen:
-                    seen.add(name)
-                    price_categories.append({
-                        "name": name,
-                        "price": float(cat_match.group(2).replace(',', '.'))
-                    })
-
-            return BayernGame(
-                id=game_id,
-                title=title,
-                opponent=opponent,
-                location=location,
-                url=url,
-                image_url=image_url,
-                match_date=match_date,
-                match_time=match_time,
-                sale_date=sale_date,
-                is_available=is_available,
-                status=status,
-                price_categories=price_categories or None
-            )
-            
-        except Exception as e:
-            logger.error(f"Error getting game details for {url}: {e}")
-            return None
-    
-    async def _check_availability(self, soup: BeautifulSoup) -> bool:
-        """Check if tickets are currently available for a game.
-
-        Takes the already-parsed product page — refetching it here cost a second
-        100 KB download per on-sale game.
-        """
-        try:
-            form = soup.find('form')
-            if form and form.get('action'):
-                event_id = form['action'].split('/')[-1]
-                
-                sku_tag = soup.find('meta', {'itemprop': 'sku'})
-                if sku_tag and sku_tag.get('content'):
-                    ticket_id = sku_tag['content'].split('-')[-1]
-                    
-                    # Check availability
-                    avail_url = (
-                        f"{self.BASE_URL}/product/catalog_ajax/dates/id/{event_id}/"
-                        f"?___store=wl_de&ticket_id={ticket_id}&availabilityType=starttime"
-                    )
-                    
-                    avail_response = await self.session.get(avail_url)
-                    if avail_response.status_code == 200:
-                        pattern = r"ticket\.setAvailableDateTimes\((\{.*?\})\);"
-                        match = re.search(pattern, avail_response.text, re.DOTALL)
-                        if match:
-                            data = json.loads(match.group(1))
-                            # Check if any tickets available
-                            for tickets in data.values():
-                                for t in tickets:
-                                    if t.get('qty_available', 0) > 0:
-                                        return True
-        except Exception as e:
-            logger.debug(f"Availability check error: {e}")
-        
-        return False
+    images = item.get("images") or []
+    return BayernGame(
+        id=pid, title=title, opponent=opponent, location=location,
+        url=product_view_url(int(pid)),
+        image_url=images[0].get("url") if images else None,
+        match_date=match_date, match_time=match_time, sale_date=sale_date,
+        price_categories=prices or None,
+    )
 
 
-async def get_bayern_games() -> List[Dict[str, Any]]:
-    """Get all FC Bayern games as a list of dicts."""
-    async with BayernScraper() as scraper:
-        games = await scraper.get_all_games()
-        return [g.to_dict() for g in games]
+async def get_bayern_games(location_filter: Optional[str] = "Ingolstadt") -> List[Dict[str, Any]]:
+    """Upcoming FC Bayern games as dicts. Raises when the product API fails,
+    so the caller keeps its last good list instead of caching 0 games.
+
+    Status: "sold_out" when the API labels the sale ended, or the sale is
+    running with no stock left; "on_sale" with stock; otherwise "upcoming".
+    `location_filter=None` returns every location."""
+    today = datetime.now(ZoneInfo("Europe/Berlin")).date()
+    async with AsyncSession(impersonate="safari17_2_ios", timeout=30) as s:
+        listed, active = await asyncio.gather(_api_products(s, True), _api_products(s, False))
+        active_ids = {str(i["id"]) for i in active}
+
+        games, ended = [], set()
+        for item in listed:
+            if "fc bayern" not in (item.get("title") or "").lower():
+                continue
+            g = _parse_game(item)
+            if location_filter and g.location.lower() != location_filter.lower():
+                continue
+            is_ended = (item.get("label") or {}).get("type") == "sale-ended"
+            # Past fixtures stay in the API for months; an ended sale without
+            # a readable date is one of them.
+            if (g.match_date and g.match_date < today) or (is_ended and not g.match_date):
+                continue
+            if is_ended:
+                ended.add(g.id)
+            games.append(g)
+
+        # Stock only for games whose sale is not over: 2 small requests each.
+        live = [g for g in games if g.id not in ended]
+        stocks = await asyncio.gather(*(_stock(s, g.id) for g in live), return_exceptions=True)
+
+    stock_by_id = {g.id: q for g, q in zip(live, stocks) if isinstance(q, int)}
+    for g in games:
+        qty = stock_by_id.get(g.id, 0)
+        if g.id in ended:
+            g.status = "sold_out"
+        elif qty > 0:
+            g.status, g.is_available = "on_sale", True
+        elif g.sale_date and g.sale_date > today:
+            g.status = "upcoming"
+        elif g.id in active_ids:
+            g.status = "sold_out"
+        else:
+            g.status = "upcoming"
+
+    logger.info(f"Found {len(games)} FC Bayern games (location: {location_filter or 'all'})")
+    return [g.to_dict() for g in games]
 
 
 BASE_URL = "https://audidefuehrungen2.regiondo.de"
@@ -442,6 +312,20 @@ def _normalize(u: str) -> str:
 # For testing
 if __name__ == "__main__":
     async def main():
+        # Offline parser check on a real description shape.
+        g = _parse_game({
+            "id": "346054", "title": "FC BAYERN MÜNCHEN - 1. FC KÖLN (Ingolstadt)",
+            "images": [{"url": "https://cdn.regiondo.net/x.jpg"}],
+            "description": "<p>Freitag, 20.11.2026 | Anstoß: 20:30 Uhr</p>"
+                           "<p>VERKAUFSSTART: MONTAG, 5. OKTOBER 2026</p>"
+                           "<p>Kategorie 1 - Block 136: 80,00 Euro</p>",
+        })
+        assert (g.opponent, g.location) == ("1. FC KÖLN", "Ingolstadt"), g
+        assert (g.match_date, g.match_time) == (date(2026, 11, 20), "20:30"), g
+        assert g.sale_date == date(2026, 10, 5), g
+        assert g.price_categories == [{"name": "Kategorie 1 - Block 136", "price": 80.0}], g
+        assert g.url.endswith("/catalog/product/view/id/346054"), g
+
         games = await get_bayern_games()
         # Smoke check against the live shop: title parsing must yield a location,
         # otherwise the location filter silently drops every game (0 games in the UI).
