@@ -15,14 +15,12 @@ import logging
 import time
 from datetime import datetime
 
-from curl_cffi.requests import AsyncSession
-
 from ..database import SessionLocal
 from ..models import Task, ReleaseDetector
-from .scraper import get_listing_products, widget_lookup, product_view_url
+from .scraper import get_listing_products, widget_lookup, widget_product, product_facts, product_view_url
 from .monitor import task_manager
-from .core import BLOCKED_GIVE_UP_S, PRODUCT_API, PRODUCT_API_HEADERS, jitter
-from .discord import send_discord_new_event, send_discord_blocked, send_discord_released
+from .core import BLOCKED_GIVE_UP_S, jitter
+from .discord import send_discord_new_event, send_discord_blocked, send_discord_released, send_discord_edited
 
 logger = logging.getLogger(__name__)
 
@@ -170,6 +168,14 @@ class ReleaseDetectorManager:
                    name: str = "", unreleased: bool = False):
         """Start a task if wanted, always ping Discord. Returns the task id or None."""
         tid = None
+        facts = {}
+        if unreleased:
+            # Kickoff, pickup window and prices are readable before publication.
+            try:
+                rec = await widget_product(url.rstrip("/").rsplit("/", 1)[-1])
+                facts = product_facts(rec) if rec else {}
+            except Exception as e:
+                logger.warning(f"[Detector] details for {url} failed: {e}")
         if matched:
             try:
                 tid = await self._launch_task(url, cfg)
@@ -177,7 +183,8 @@ class ReleaseDetectorManager:
                 logger.error(f"[Detector] failed to launch {url}: {e}")
                 cfg.error_message = f"launch failed for {url}: {e}"
         try:
-            await send_discord_new_event(url, carted=tid is not None, name=name, unreleased=unreleased)
+            await send_discord_new_event(url, carted=tid is not None, name=name,
+                                         unreleased=unreleased, facts=facts)
         except Exception as e:
             logger.warning(f"[Detector] discord ping failed: {e}")
         return tid
@@ -232,28 +239,35 @@ class ReleaseDetectorManager:
         return acted
 
     async def _check_releases(self, cfg: ReleaseDetector):
-        """Ask the product API (no Cloudflare) whether a product found hidden has
-        gone live, and ping Discord with how long it stayed hidden. Runs right
-        after the frontier scan, so a product that was already live when found
-        gets its ping in the same scan."""
+        """Read each product found hidden from the widget route (the shop's own
+        record, no Cloudflare). `status` "1" = live: ping Discord with how long
+        it stayed hidden. A changed `updated_at` while still hidden = Audi
+        edited it, which tends to come shortly before a release: ping that too.
+        Runs right after the frontier scan, so a product that was already live
+        when found gets its ping in the same scan."""
         awaiting = json.loads(cfg.awaiting_release or "{}")
         if not awaiting:
             return
         now = datetime.utcnow()
-        async with AsyncSession(impersonate="safari17_2_ios", timeout=15) as s:
-            for pid, info in list(awaiting.items()):
-                found = datetime.fromisoformat(info["found"])
-                try:
-                    r = await s.get(PRODUCT_API.format(pid), headers=PRODUCT_API_HEADERS)
-                except Exception as e:
-                    logger.warning(f"[Detector] release check {pid} failed: {e}")
-                    break
-                if r.status_code == 200:
-                    logger.info(f"[Detector] {pid} released {info['name']!r}")
-                    del awaiting[pid]
-                    await send_discord_released(product_view_url(int(pid)), info["name"], found)
-                elif (now - found).days > RELEASE_WATCH_DAYS:
-                    del awaiting[pid]
+        for pid, info in list(awaiting.items()):
+            found = datetime.fromisoformat(info["found"])
+            try:
+                rec = await widget_product(pid)
+            except Exception as e:
+                logger.warning(f"[Detector] release check {pid} failed: {e}")
+                break
+            if rec and rec.get("status") == "1":
+                logger.info(f"[Detector] {pid} released {info['name']!r}")
+                del awaiting[pid]
+                await send_discord_released(product_view_url(int(pid)), info["name"], found)
+            elif rec and "updated" not in info:
+                info["updated"] = rec.get("updated_at")  # first look: baseline only
+            elif rec and rec.get("updated_at") != info["updated"]:
+                logger.info(f"[Detector] {pid} edited while hidden ({info['updated']} -> {rec.get('updated_at')})")
+                info["updated"] = rec.get("updated_at")
+                await send_discord_edited(product_view_url(int(pid)), info["name"], product_facts(rec))
+            elif (now - found).days > RELEASE_WATCH_DAYS:
+                del awaiting[pid]
         cfg.awaiting_release = json.dumps(awaiting, sort_keys=True)
 
     async def _loop(self):

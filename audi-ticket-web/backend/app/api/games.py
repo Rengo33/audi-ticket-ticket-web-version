@@ -2,6 +2,7 @@
 API endpoints for FC Bayern games and scheduled tasks.
 """
 import asyncio
+import json
 import logging
 from datetime import datetime, date, timedelta
 from typing import List, Optional
@@ -11,9 +12,9 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 
-from ..database import get_db
+from ..database import SessionLocal, get_db
 from ..auth import get_current_user
-from ..models import ScheduledTask, Task, TaskStatus
+from ..models import ReleaseDetector, ScheduledTask, Task, TaskStatus
 from ..bot.scraper import get_bayern_games
 
 logger = logging.getLogger(__name__)
@@ -52,6 +53,19 @@ def _kickoff_utc(game: dict) -> Optional[datetime]:
         return None
 
 
+def _hidden_ids() -> list:
+    """FC Bayern products the release detector has found (by widget name), so
+    the list can show them before they are published. Released ones are
+    already in the API list and get skipped there."""
+    db = SessionLocal()
+    try:
+        cfg = db.query(ReleaseDetector).filter(ReleaseDetector.id == 1).first()
+        found = json.loads(cfg.launched_ids or "{}") if cfg else {}
+        return [pid for pid, name in found.items() if "fc bayern" in (name or "").lower()]
+    finally:
+        db.close()
+
+
 def _cache_is_fresh(now: datetime) -> bool:
     return bool(_games_cache["updated_at"]) and (now - _games_cache["updated_at"]).total_seconds() < CACHE_TTL
 
@@ -67,7 +81,7 @@ async def _ensure_games_cache() -> list:
         if _cache_is_fresh(now):
             return _games_cache["data"]
         try:
-            games = await get_bayern_games()
+            games = await get_bayern_games(hidden_ids=_hidden_ids())
             _games_cache["data"] = games
             _games_cache["updated_at"] = now
             logger.info(f"Refreshed games cache: {len(games)} games")
@@ -206,7 +220,7 @@ async def refresh_games(
     global _games_cache
     
     try:
-        games = await get_bayern_games()
+        games = await get_bayern_games(hidden_ids=_hidden_ids())
         _games_cache["data"] = games
         _games_cache["updated_at"] = datetime.utcnow()
         return {"success": True, "count": len(games)}

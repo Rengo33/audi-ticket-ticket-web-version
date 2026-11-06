@@ -3,11 +3,12 @@ FC Bayern games (from Regiondo's product API) plus the shop listing and
 booking-widget lookups the release detector uses.
 """
 import asyncio
+import html
 import re
 import json
 import logging
 from datetime import datetime, date
-from typing import Optional, List, Dict, Any, Tuple
+from typing import Optional, List, Dict, Any, Iterable, Tuple
 from dataclasses import dataclass, asdict
 from zoneinfo import ZoneInfo
 
@@ -60,7 +61,9 @@ _KICKOFF_RE = re.compile(r"(\d{1,2})\.(\d{1,2})\.(\d{4})\s*\|\s*Ansto\S*\s*(\d{1
 # First "1. Oktober 2026" after VERKAUFSSTART; the words in between vary
 # ("VERKAUFSSTART GEPLANT FÜR: DONNERSTAG, 01. OKTOBER 2026").
 _SALE_RE = re.compile(r"VERKAUFSSTART[^<]{0,60}?(\d{1,2})\.\s*([A-Za-zÄÖÜäöü]+)\s+(\d{4})", re.I)
-_PRICE_RE = re.compile(r"(Kategorie\s+\d+\s*-\s*Block\s+\d+):\s*([\d,.]+)\s*Euro")
+_PRICE_RE = re.compile(r"(Kategorie\s+\d+\s*-\s*Block\s+\d+):\s*([\d,.]+)\s*(?:Euro|€)")
+# "Zeitraum der Abholung: Freitag, 04.12.2026 bis Dienstag, 08.12.2026 jeweils von 08:00 Uhr bis 16:00 Uhr"
+_PICKUP_RE = re.compile(r"Zeitraum der Abholung:\s*(.+?)\s+jeweils von\s+(.+?Uhr\s+bis\s+.+?Uhr)")
 _MONTHS = {
     "januar": 1, "februar": 2, "märz": 3, "maerz": 3, "april": 4, "mai": 5,
     "juni": 6, "juli": 7, "august": 8, "september": 9, "oktober": 10,
@@ -97,7 +100,7 @@ def _parse_game(item: dict) -> BayernGame:
     """Build a game from one product-list item (title + description only)."""
     pid, title = str(item["id"]), item.get("title") or ""
     desc = item.get("description") or ""
-    text = re.sub(r"<[^>]+>", " ", desc)
+    text = html.unescape(re.sub(r"<[^>]+>", " ", desc))
 
     m = _TITLE_RE.search(title)
     opponent = m.group(1).strip() if m else re.sub(r"(?i)fc bayern münchen", "", title).strip(" -–")
@@ -113,7 +116,7 @@ def _parse_game(item: dict) -> BayernGame:
             pass
 
     sale_date = None
-    sm = _SALE_RE.search(desc)
+    sm = _SALE_RE.search(text)
     if sm and sm.group(2).lower() in _MONTHS:
         try:
             sale_date = date(int(sm.group(3)), _MONTHS[sm.group(2).lower()], int(sm.group(1)))
@@ -121,7 +124,7 @@ def _parse_game(item: dict) -> BayernGame:
             pass
 
     prices, seen = [], set()
-    for name, price in _PRICE_RE.findall(desc):
+    for name, price in _PRICE_RE.findall(text):
         if name not in seen:
             seen.add(name)
             prices.append({"name": name.strip(), "price": float(price.replace(",", "."))})
@@ -136,17 +139,54 @@ def _parse_game(item: dict) -> BayernGame:
     )
 
 
-async def get_bayern_games(location_filter: Optional[str] = "Ingolstadt") -> List[Dict[str, Any]]:
+def _widget_item(rec: dict) -> dict:
+    """A widget product record in the product-list item shape _parse_game reads."""
+    return {
+        "id": rec["entity_id"], "title": rec.get("name") or "",
+        "description": rec.get("description") or "",
+        "images": [{"url": CDN_MEDIA + rec["image"]}] if rec.get("image") else [],
+    }
+
+
+def product_facts(rec: dict) -> Dict[str, str]:
+    """Kickoff, pickup window and category prices of a widget product record,
+    for alerts about products that are not public yet. Missing parts are left out."""
+    g = _parse_game(_widget_item(rec))
+    text = html.unescape(re.sub(r"<[^>]+>", " ", rec.get("description") or ""))
+    facts = {}
+    if g.match_date:
+        facts["kickoff"] = g.match_date.strftime("%d.%m.%Y") + (f" {g.match_time}" if g.match_time else "")
+    p = _PICKUP_RE.search(re.sub(r"\s+", " ", text))
+    if p:
+        facts["pickup"] = f"{p.group(1)}, {p.group(2)}"
+    if g.price_categories:
+        facts["prices"] = ", ".join(f"{c['name']}: {c['price']:.0f} €" for c in g.price_categories)
+    return facts
+
+
+async def get_bayern_games(location_filter: Optional[str] = "Ingolstadt",
+                           hidden_ids: Iterable = ()) -> List[Dict[str, Any]]:
     """Upcoming FC Bayern games as dicts. Raises when the product API fails,
     so the caller keeps its last good list instead of caching 0 games.
 
     Status: "sold_out" when the API labels the sale ended, or the sale is
     running with no stock left; "on_sale" with stock; otherwise "upcoming".
+    `hidden_ids` (products the release detector found before publication) are
+    read from the widget route and listed as "upcoming" while still hidden.
     `location_filter=None` returns every location."""
     today = datetime.now(ZoneInfo("Europe/Berlin")).date()
     async with AsyncSession(impersonate="safari17_2_ios", timeout=30) as s:
         listed, active = await asyncio.gather(_api_products(s, True), _api_products(s, False))
         active_ids = {str(i["id"]) for i in active}
+
+        listed_ids = {str(i["id"]) for i in listed}
+        recs = await asyncio.gather(
+            *(widget_product(pid) for pid in hidden_ids if str(pid) not in listed_ids),
+            return_exceptions=True,
+        )
+        hidden = [r for r in recs if isinstance(r, dict) and r.get("status") != "1"]
+        hidden_set = {r["entity_id"] for r in hidden}
+        listed = listed + [_widget_item(r) for r in hidden]
 
         games, ended = [], set()
         for item in listed:
@@ -165,7 +205,7 @@ async def get_bayern_games(location_filter: Optional[str] = "Ingolstadt") -> Lis
             games.append(g)
 
         # Stock only for games whose sale is not over: 2 small requests each.
-        live = [g for g in games if g.id not in ended]
+        live = [g for g in games if g.id not in ended and g.id not in hidden_set]
         stocks = await asyncio.gather(*(_stock(s, g.id) for g in live), return_exceptions=True)
 
     stock_by_id = {g.id: q for g, q in zip(live, stocks) if isinstance(q, int)}
@@ -298,6 +338,25 @@ async def widget_lookup(pid: int) -> Optional[Tuple[str, str]]:
     return (b.group(1) if b else "", t.group(1) if t else "")
 
 
+WIDGET_PRODUCT = "https://regiondo.net/widgets/booking/product?locale=de_DE&provider=AU43&product={}"
+CDN_MEDIA = "https://cdn.regiondo.net/media/catalog/product"
+
+
+async def widget_product(pid) -> Optional[dict]:
+    """Full shop record of a product by ID, hidden ones included (regiondo.net,
+    no Cloudflare): `status` "2" hidden / "1" live, `updated_at` = Audi's last
+    save, `ticket_id`, `name`, `description`. None = no such product. Raises
+    on any other failure so an outage never reads as "not found"."""
+    global _widget_session
+    if _widget_session is None:
+        _widget_session = AsyncSession(impersonate="safari17_2_ios", timeout=15)
+    r = await _widget_session.get(WIDGET_PRODUCT.format(pid))
+    if r.status_code != 200:
+        raise RuntimeError(f"widget product {pid} returned {r.status_code}")
+    data = r.json()
+    return data if data.get("entity_id") else None
+
+
 def product_view_url(pid: int) -> str:
     """Public product page by ID: 301 to /kategorien while hidden, 200 once live."""
     return f"{BASE_URL}/catalog/product/view/id/{pid}"
@@ -325,6 +384,16 @@ if __name__ == "__main__":
         assert g.sale_date == date(2026, 10, 5), g
         assert g.price_categories == [{"name": "Kategorie 1 - Block 136", "price": 80.0}], g
         assert g.url.endswith("/catalog/product/view/id/346054"), g
+        # Widget record of a hidden product: "€" prices and the pickup window.
+        facts = product_facts({
+            "entity_id": "346058", "name": "FC BAYERN MÜNCHEN - SK SLAVIA PRAG (Ingolstadt)",
+            "description": "<p>Dienstag, 08.12.2026 | Anstoß: 21:00 Uhr</p><p>Zeitraum der Abholung:<br />"
+                           "<strong>Freitag, 04.12.2026 bis Dienstag, 08.12.2026</strong><br />jeweils von "
+                           "<strong>08:00 Uhr bis 16:00 Uhr</strong></p><p>• Kategorie 3 - Block 237: 50,00&nbsp;€</p>",
+        })
+        assert facts == {"kickoff": "08.12.2026 21:00",
+                         "pickup": "Freitag, 04.12.2026 bis Dienstag, 08.12.2026, 08:00 Uhr bis 16:00 Uhr",
+                         "prices": "Kategorie 3 - Block 237: 50 €"}, facts
 
         games = await get_bayern_games()
         # Smoke check against the live shop: title parsing must yield a location,
