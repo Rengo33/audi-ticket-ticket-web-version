@@ -1,7 +1,7 @@
 <template>
   <div class="login">
-    <!-- decorative scoreboard stripe -->
-    <div class="scoreboard" aria-hidden="true">
+    <!-- scoreboard: next fixture + the ones after it (public /api/games/upcoming) -->
+    <div class="scoreboard" :class="{ empty: !nextGame }">
       <div class="sb-row">
         <span class="sb-label mono">HOME</span>
         <span class="sb-team">FCB</span>
@@ -13,6 +13,17 @@
         <span class="sb-score mono">—</span>
       </div>
       <div class="sb-kick mono">KICKOFF · {{ nextGame ? countdown : '—' }}</div>
+      <div v-if="nextGame" class="sb-meta mono">
+        <span>{{ fixtureDate(nextGame) }} · {{ nextGame.location.toUpperCase() }}</span>
+        <span class="sb-status" :class="nextGame.status">{{ statusLabel(nextGame) }}</span>
+      </div>
+      <ul v-if="fixtures.length > 1" class="sb-fixtures">
+        <li v-for="f in fixtures.slice(1)" :key="f.kickoff_utc">
+          <span class="sb-fx-date mono">{{ fixtureDate(f) }}</span>
+          <span class="sb-fx-team">{{ f.opponent }}</span>
+          <span class="sb-status mono" :class="f.status">{{ statusLabel(f) }}</span>
+        </li>
+      </ul>
     </div>
 
     <div class="login-panel">
@@ -62,7 +73,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted, nextTick } from 'vue'
+import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { useAuthStore } from '../stores/auth'
 
@@ -72,7 +83,8 @@ const authStore = useAuthStore()
 const password = ref('')
 const pwField = ref(null)
 
-const nextGame = ref(null)
+const fixtures = ref([])
+const nextGame = computed(() => fixtures.value[0] || null)
 const countdown = ref('—')
 let tickTimer = null
 let fetchController = null
@@ -105,15 +117,33 @@ function formatCountdown(kickoffMs) {
   return `${pad(hours)}:${pad(mins)}:${pad(secs)}`
 }
 
+// match_date/match_time are Berlin local: "2026-11-20" + "20:30" -> "FRI 20.11 · 20:30"
+function fixtureDate(f) {
+  if (!f.match_date) return '—'
+  const [y, m, d] = f.match_date.split('-')
+  const wd = new Date(Date.UTC(+y, +m - 1, +d)).toLocaleDateString('en-GB', { weekday: 'short', timeZone: 'UTC' })
+  return `${wd.toUpperCase()} ${d}.${m}${f.match_time ? ` · ${f.match_time}` : ''}`
+}
+
+function statusLabel(f) {
+  if (f.status === 'on_sale') return 'ON SALE'
+  if (f.status === 'sold_out') return 'SOLD OUT'
+  if (f.sale_date) {
+    const [, m, d] = f.sale_date.split('-')
+    return `SALE ${d}.${m}`
+  }
+  return 'SOON'
+}
+
 async function loadNextGame() {
   fetchController = new AbortController()
   try {
-    const res = await fetch('/api/games/next', { signal: fetchController.signal })
+    const res = await fetch('/api/games/upcoming', { signal: fetchController.signal })
     if (!res.ok) return
     const data = await res.json()
-    if (!data || !data.kickoff_utc) return
-    nextGame.value = data
-    const kickoffMs = new Date(data.kickoff_utc).getTime()
+    if (!Array.isArray(data) || !data.length || !data[0].kickoff_utc) return
+    fixtures.value = data
+    const kickoffMs = new Date(data[0].kickoff_utc).getTime()
     countdown.value = formatCountdown(kickoffMs)
     if (tickTimer) clearInterval(tickTimer)
     tickTimer = setInterval(() => {
@@ -270,11 +300,15 @@ onUnmounted(() => {
   color: var(--ink-4);
 }
 
-/* Scoreboard decoration — hidden on narrow screens, decorative on wide */
+/* Scoreboard — in the flow under the form on narrow screens (only once a
+   fixture loaded), floating bottom-right on wide ones */
 .scoreboard {
-  display: none;
-  position: absolute;
-  bottom: 2.5rem; right: 2.5rem;
+  order: 1;
+  align-self: start;
+  position: relative;
+  width: calc(100% - 3rem);
+  max-width: 412px;
+  margin: 0 auto calc(2rem + var(--safe-b));
   z-index: 1;
   padding: 1rem 1.25rem;
   background: var(--ink);
@@ -302,6 +336,8 @@ onUnmounted(() => {
   font-size: 1.25rem;
   font-weight: 900;
   letter-spacing: -0.02em;
+  min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .sb-score {
   font-size: 1.25rem;
@@ -317,10 +353,45 @@ onUnmounted(() => {
   border-top: 1px solid rgba(255,255,255,0.08);
   text-align: center;
 }
+.scoreboard.empty { display: none; }
+.sb-meta {
+  display: flex; justify-content: space-between; align-items: center; gap: 10px;
+  font-size: 0.625rem;
+  letter-spacing: 0.14em;
+  color: var(--ink-4);
+  margin-top: 8px;
+}
+.sb-status { color: var(--signal); font-weight: 700; letter-spacing: 0.14em; font-size: 0.625rem; white-space: nowrap; }
+.sb-status.on_sale { color: var(--ok); }
+.sb-status.sold_out { color: var(--ink-4); }
+.sb-fixtures {
+  list-style: none;
+  margin: 10px 0 0; padding: 8px 0 0;
+  border-top: 1px solid rgba(255,255,255,0.08);
+  display: flex; flex-direction: column; gap: 6px;
+}
+.sb-fixtures li {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: baseline;
+  gap: 10px;
+}
+.sb-fx-date { font-size: 0.625rem; letter-spacing: 0.1em; color: var(--ink-4); white-space: nowrap; }
+.sb-fx-team {
+  font-size: 0.8125rem; font-weight: 700;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  min-width: 0;
+}
 
 @media (min-width: 900px) {
   .login-panel { max-width: 520px; padding: 3rem 4rem; margin: 0; align-self: center; }
-  .scoreboard { display: block; }
+  .scoreboard {
+    position: absolute;
+    bottom: 2.5rem; right: 2.5rem;
+    width: auto; max-width: 340px;
+    margin: 0;
+  }
+  .scoreboard.empty { display: block; }
 }
 
 @media (min-width: 1200px) {

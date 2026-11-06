@@ -30,12 +30,14 @@ _games_cache_lock = asyncio.Lock()
 CACHE_TTL = 900  # 15 minutes
 
 
-class NextGameResponse(BaseModel):
+class FixtureResponse(BaseModel):
     opponent: str
     location: str
     match_date: Optional[str]
     match_time: Optional[str]
     kickoff_utc: Optional[str]
+    status: str
+    sale_date: Optional[str]
 
 
 def _kickoff_utc(game: dict) -> Optional[datetime]:
@@ -77,26 +79,25 @@ async def _ensure_games_cache() -> list:
             raise HTTPException(status_code=500, detail="Failed to fetch games")
 
 
-@router.get("/next", response_model=Optional[NextGameResponse])
-async def next_game():
-    """Public headline for the Login scoreboard — next upcoming FCB fixture."""
+@router.get("/upcoming", response_model=List[FixtureResponse])
+async def upcoming_games():
+    """Public fixture list for the Login screen — next FCB games by kickoff.
+    No auth: it only repeats what the shop shows publicly."""
     try:
         games = await _ensure_games_cache()
     except HTTPException:
-        return None
+        return []
     now_utc = datetime.utcnow()
     upcoming = [(g, _kickoff_utc(g)) for g in games]
-    upcoming = [(g, k) for g, k in upcoming if k and k > now_utc]
-    if not upcoming:
-        return None
-    g, k = min(upcoming, key=lambda gk: gk[1])
-    return NextGameResponse(
-        opponent=g["opponent"],
-        location=g["location"],
-        match_date=g.get("match_date"),
-        match_time=g.get("match_time"),
-        kickoff_utc=k.isoformat() + "Z",
-    )
+    upcoming = sorted(((g, k) for g, k in upcoming if k and k > now_utc), key=lambda gk: gk[1])
+    return [
+        FixtureResponse(
+            opponent=g["opponent"], location=g["location"],
+            match_date=g.get("match_date"), match_time=g.get("match_time"),
+            kickoff_utc=k.isoformat() + "Z", status=g["status"], sale_date=g.get("sale_date"),
+        )
+        for g, k in upcoming[:5]
+    ]
 
 
 class GameResponse(BaseModel):
