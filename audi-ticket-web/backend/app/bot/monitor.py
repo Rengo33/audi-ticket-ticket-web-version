@@ -20,12 +20,16 @@ from ..database import SessionLocal
 from .core import AudiTicketBot, CookieData, SiteBlocked, cart_via_regiondo_enabled, jitter
 from .discord import send_discord_notification, send_discord_cart_success, send_discord_blocked
 from .web_push import send_push
+from .scraper import widget_product
 
 logger = logging.getLogger(__name__)
 
-# Waiting for release: the product API (no Cloudflare) every ~10s, the shop page
-# (Cloudflare) only every ~60s as a fallback in case the API lags the flip.
+# Waiting for release: the shop's own product record via the widget route (no
+# Cloudflare) every ~10s, every ~3s once Audi has edited the hidden product
+# (edits come shortly before a release), the shop page (Cloudflare) only every
+# ~60s as a last fallback.
 RELEASE_RECHECK_S = 10
+RELEASE_FAST_S = 3
 SHOP_FALLBACK_S = 60
 settings = get_settings()
 
@@ -561,7 +565,7 @@ class TaskManager:
                     waiters = self._release_waiters.setdefault(product_url, set())
                     waiters.add(task_id)
                     await self._log(task_id, "info",
-                        f"Waiting for release — product API every ~{RELEASE_RECHECK_S}s, shop every ~{SHOP_FALLBACK_S}s "
+                        f"Waiting for release — shop record every ~{RELEASE_RECHECK_S}s (~{RELEASE_FAST_S}s once Audi edits it), shop page every ~{SHOP_FALLBACK_S}s "
                         f"(shared with {len(waiters) - 1} other task(s))", db)
                     if product_url not in self._release_polls:
                         self._release_polls[product_url] = asyncio.create_task(
@@ -632,27 +636,44 @@ class TaskManager:
             raise
 
     async def _poll_release(self, product_url: str):
-        """Wait until a hidden product goes visible, for every task waiting on it.
-        Event ID = product ID and the ticket ID comes from the API's SKU, so no
-        shop page is needed; the shop page is only a slow fallback.
+        """Wait until a hidden product goes live, for every task waiting on it.
+        Event ID = product ID and the ticket ID comes from the widget record
+        (`status` "1" = live), so no shop page is needed. The product API
+        covers a widget-route failure; the shop page is only a slow fallback.
         Returns (event_id, ticket_id, categories) once live, (None, None, [])
         when no task waits any more. Raises SiteBlocked (and alerts) when
         neither source answered for 10 min, so the waiting tasks stop."""
         product_id = product_url.rstrip("/").rsplit("/", 1)[-1]
         db = SessionLocal()
         checks = 0
+        seen_update, fast = None, False
         next_shop = time.monotonic() + jitter(SHOP_FALLBACK_S)
         try:
             async with AudiTicketBot() as bot:
                 while self._release_waiters.get(product_url):
-                    await asyncio.sleep(jitter(RELEASE_RECHECK_S))
+                    await asyncio.sleep(jitter(RELEASE_FAST_S if fast else RELEASE_RECHECK_S))
+                    ticket_id = None
                     try:
-                        ticket_id = await bot.api_ticket_id(product_id)
+                        rec = await widget_product(product_id)
+                        bot.last_ok = time.monotonic()
+                        if rec and rec.get("status") == "1":
+                            ticket_id = rec.get("ticket_id")
+                        elif rec:
+                            if seen_update is None:
+                                seen_update = rec.get("updated_at")
+                            elif rec.get("updated_at") != seen_update and not fast:
+                                fast = True
+                                for tid in list(self._release_waiters.get(product_url, ())):
+                                    await self._log(tid, "info",
+                                        f"Audi edited the hidden product — checking every ~{RELEASE_FAST_S}s", db)
                     except Exception as e:
-                        logger.warning(f"[Release {product_id}] API check failed: {e}")
-                        ticket_id = None
+                        logger.warning(f"[Release {product_id}] widget check failed: {e}")
+                        try:
+                            ticket_id = await bot.api_ticket_id(product_id)
+                        except Exception as e2:
+                            logger.warning(f"[Release {product_id}] API check failed: {e2}")
                     if ticket_id:
-                        logger.info(f"[Release {product_id}] visible in API, ticket {ticket_id}")
+                        logger.info(f"[Release {product_id}] live, ticket {ticket_id}")
                         return product_id, ticket_id, []
                     if time.monotonic() >= next_shop:
                         next_shop = time.monotonic() + jitter(SHOP_FALLBACK_S)

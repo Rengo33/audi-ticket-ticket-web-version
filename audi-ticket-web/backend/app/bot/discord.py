@@ -156,9 +156,16 @@ async def send_discord_notification(data: Dict[str, Any], product_url: str):
     await send_discord_message(msg)
 
 
-async def send_discord_new_event(product_url: str, carted: bool, name: str = "", unreleased: bool = False):
+def _fact_fields(facts: Optional[dict]) -> list:
+    """Kickoff / pickup / prices from scraper.product_facts as embed fields."""
+    labels = (("kickoff", "Kickoff"), ("pickup", "Pickup"), ("prices", "Prices"))
+    return [_field(label, facts[k]) for k, label in labels if facts and facts.get(k)]
+
+
+async def send_discord_new_event(product_url: str, carted: bool, name: str = "",
+                                 unreleased: bool = False, facts: Optional[dict] = None):
     """Release detector found a new product (on the listing, or created but not
-    yet released when `unreleased`)."""
+    yet released when `unreleased`). `facts` adds kickoff, pickup and prices."""
     status = "🛒 Auto-carting now" if carted else "👀 Detected (no task started)"
     if unreleased and carted:
         status = "⏳ Task started — carts the moment it goes live"
@@ -168,7 +175,21 @@ async def send_discord_new_event(product_url: str, carted: bool, name: str = "",
         "embeds": [_embed(
             "🕵️ New event created (not released yet)" if unreleased else "🚨 New event detected!",
             0xDC052D,
-            [_field("Product", label), _field("Action", status)],
+            [_field("Product", label), _field("Action", status), *_fact_fields(facts)],
+        )]
+    }
+    await send_discord_message(msg)
+
+
+async def send_discord_edited(product_url: str, name: str, facts: Optional[dict] = None):
+    """Audi saved a product that is still hidden — edits tend to come shortly
+    before a release, so this is the early warning."""
+    msg = {
+        "username": "Audi Ticket Bot",
+        "embeds": [_embed(
+            "✏️ Hidden event edited — release may be near",
+            0xF5A623,
+            [_field("Product", f"[{name}]({product_url})"), *_fact_fields(facts)],
         )]
     }
     await send_discord_message(msg)
