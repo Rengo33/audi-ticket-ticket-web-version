@@ -357,6 +357,39 @@ async def widget_product(pid) -> Optional[dict]:
     return data if data.get("entity_id") else None
 
 
+CATEGORIES_URL = ("https://regiondo.net/widgets/booking/product/ticketVariations"
+                  "?locale=de_DE&provider=AU43&includeSoldOut=1&product={}")
+TIMESLOTS_URL = PRODUCT_API.rsplit("/", 2)[0] + "/timeslots/times?productId={}&numberOfMonths=3&variationId={}"
+# x-partner-domain must be exactly this, other values answer 500.
+TIMESLOTS_HEADERS = {**PRODUCT_API_HEADERS, "x-partner-domain": "https://audidefuehrungen2.regiondo.de"}
+
+
+async def category_stock(pid) -> List[Dict[str, Any]]:
+    """Tickets left per category, e.g. [{"title": "Block 237 - Kategorie 3",
+    "available": 24, "capacity": 180}, ...], in the shop's category order.
+    Category list from the widget route, stock per category from the product
+    API's timeslots (both no Cloudflare). Raises on failure."""
+    global _widget_session
+    if _widget_session is None:
+        _widget_session = AsyncSession(impersonate="safari17_2_ios", timeout=15)
+    r = await _widget_session.get(CATEGORIES_URL.format(pid))
+    if r.status_code != 200:
+        raise RuntimeError(f"categories {pid} returned {r.status_code}")
+    cats = r.json().get("variations") or []
+    slots = await asyncio.gather(*(
+        _widget_session.get(TIMESLOTS_URL.format(pid, c["variation_id"]), headers=TIMESLOTS_HEADERS)
+        for c in cats))
+    out = []
+    for c, t in zip(cats, slots):
+        if t.status_code != 200:
+            raise RuntimeError(f"timeslots {pid}/{c['variation_id']} returned {t.status_code}")
+        times = [x for day in (t.json().get("days") or {}).values() for x in day["times"].values()]
+        out.append({"title": c.get("title") or c["variation_id"],
+                    "available": sum(x.get("availableQuantity", 0) for x in times),
+                    "capacity": sum(x.get("capacity", 0) for x in times)})
+    return out
+
+
 async def api_visible(pid) -> bool:
     """True once the product API serves the product, which it only does for
     public products (404 while hidden, including Audi's brief placeholder
