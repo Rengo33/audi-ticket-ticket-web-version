@@ -74,6 +74,20 @@ def set_shop_via_origin(enabled: bool):
     _shop_via_origin = enabled
 
 
+# Live cart-route switch. When on, ATC goes through regiondo.net (CF-free,
+# marketplace store) instead of the Audi host. Opt-in only — never automatic.
+_cart_via_regiondo: bool = False
+
+
+def cart_via_regiondo_enabled() -> bool:
+    return _cart_via_regiondo
+
+
+def set_cart_via_regiondo(enabled: bool):
+    global _cart_via_regiondo
+    _cart_via_regiondo = enabled
+
+
 def shop_curl_options(via_origin: Optional[bool] = None) -> dict:
     """Pin the shop host to its origin IPs so shop traffic skips Cloudflare.
     Cloudflare hard-blocks the server IP for hours at a time ("Sorry, you have
@@ -113,7 +127,8 @@ class AudiTicketBot:
     """
     
     BASE_URL = "https://audidefuehrungen2.regiondo.de"
-    
+    REGIONDO_NET = "https://regiondo.net"  # CF-free marketplace host (opt-in ATC route)
+
     def __init__(self):
         self.session: Optional[AsyncSession] = None
         self.via_origin: Optional[bool] = None  # shop route the session was built with
@@ -392,6 +407,74 @@ class AudiTicketBot:
             logger.error(f"ATC exception: {e}")
             return False, None, str(e)
     
+    async def add_to_cart_regiondo(
+        self, event_id: str, date: str, time_short: str, ticket_variation: str,
+        option_number: str, quantity: int, product_url: str
+    ) -> Tuple[bool, Optional[CookieData], Optional[str]]:
+        """CF-free ATC via regiondo.net (the marketplace host).
+
+        regiondo.net serves the same Magento `ajaxadd` with no Cloudflare and no
+        origin pinning (~250 ms). The cart lands in the marketplace store, but
+        checkout there renders the same Audi buyer fields and places a real,
+        Audi-visible order (verified 2026-11-06, booking 101804078317). Used only
+        when the `cart_via_regiondo` switch is on — never as an automatic fallback.
+
+        The shop sets `frontend` for domain `.regiondo.de`, which a client on
+        regiondo.net drops — so we read it from Set-Cookie and return it scoped
+        to `.regiondo.de`, where www.regiondo.de checkout picks it up.
+        """
+        url = f"{self.REGIONDO_NET}/checkout/ajaxcart/ajaxadd/product/{event_id}"
+        payload = {
+            'product': event_id, 'related_product': '',
+            'ticket_date': date, 'ticket_time': time_short,
+            'ticket_variation': ticket_variation,
+            f'ticket_option_qty[{option_number}]': str(quantity),
+        }
+        headers = {
+            "accept": "application/json, text/javascript, */*; q=0.01",
+            "content-type": "application/x-www-form-urlencoded; charset=UTF-8",
+            "origin": self.REGIONDO_NET,
+            "referer": f"{self.REGIONDO_NET}/bookingwidget/vendor/30797/id/{event_id}",
+            "x-requested-with": "XMLHttpRequest",
+        }
+        try:
+            # Fresh plain session: regiondo.net resolves normally (no origin pin).
+            async with AsyncSession(impersonate="safari17_2_ios") as s:
+                r = await s.post(url, headers=headers, data=payload)
+                logger.info(f"[ATC/regiondo] Status: {r.status_code} Body: {r.text[:300]}")
+                if r.status_code != 200:
+                    return False, None, f"HTTP {r.status_code}"
+                try:
+                    data = r.json()
+                except Exception:
+                    return False, None, "non-JSON response"
+                if data.get("success") is not True:
+                    msg = "refused"
+                    if data.get("messages"):
+                        msg = data["messages"][0].get("text", msg)
+                    elif data.get("error"):
+                        msg = data["error"]
+                    return False, None, msg
+                # Same quote-item check as add_to_cart, minus the checkout-page
+                # verify. ponytail: skipped when the fields are absent (not yet
+                # seen on a real regiondo.net add); add a www.regiondo.de cart
+                # verify if phantoms show up.
+                if "qtm_quote_item_ids" in data:
+                    qtys = data.get("qtm_quote_item_qtys") or 0
+                    if not data["qtm_quote_item_ids"] or int(qtys) <= 0:
+                        return False, None, "No items added to cart (out of stock?)"
+                frontend = None
+                for k, v in r.headers.multi_items():
+                    if k.lower() == "set-cookie" and v.lstrip().startswith("frontend="):
+                        frontend = v.split(";", 1)[0].split("=", 1)[1].strip()
+                        break
+                if not frontend:
+                    return False, None, "no frontend cookie in Set-Cookie"
+                return True, CookieData("frontend", frontend, ".regiondo.de"), None
+        except Exception as e:
+            logger.error(f"[ATC/regiondo] exception: {e}")
+            return False, None, str(e)
+
     def _extract_session_cookie(self) -> Optional[CookieData]:
         """Extract the session cookie from the session."""
         if not self.session:

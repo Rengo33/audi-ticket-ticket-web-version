@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 from ..models import Task, TaskStatus, CartSession, TaskLog
 from ..config import get_settings
 from ..database import SessionLocal
-from .core import AudiTicketBot, CookieData, SiteBlocked, jitter
+from .core import AudiTicketBot, CookieData, SiteBlocked, cart_via_regiondo_enabled, jitter
 from .discord import send_discord_notification, send_discord_cart_success, send_discord_blocked
 from .web_push import send_push
 
@@ -756,10 +756,19 @@ class TaskManager:
         atc_bot = AudiTicketBot()
         await atc_bot.start_session()
         try:
-            success, cookie, error = await atc_bot.add_to_cart(
-                event_id, date, time_short, variation,
-                option_number, quantity, product_url
-            )
+            # Cart route is an explicit mode, never an automatic fallback.
+            if cart_via_regiondo_enabled():
+                success, cookie, error = await atc_bot.add_to_cart_regiondo(
+                    event_id, date, time_short, variation,
+                    option_number, quantity, product_url
+                )
+                checkout_url = "https://www.regiondo.de/checkout/cart"
+            else:
+                success, cookie, error = await atc_bot.add_to_cart(
+                    event_id, date, time_short, variation,
+                    option_number, quantity, product_url
+                )
+                checkout_url = "https://audidefuehrungen2.regiondo.de/checkout/cart"
 
             if success and cookie:
                 total_time = time.time() - start_time
@@ -772,7 +781,7 @@ class TaskManager:
                     token=token, task_id=task_id, event_id=event_id,
                     cookie_name=cookie.name, cookie_value=cookie.value,
                     cookie_domain=cookie.domain, product_url=product_url,
-                    checkout_url="https://audidefuehrungen2.regiondo.de/checkout/cart",
+                    checkout_url=checkout_url,
                     quantity=quantity, price_category=price_category,
                     total_time=total_time,
                     expires_at=datetime.utcnow() + timedelta(seconds=settings.cart_hold_time)
