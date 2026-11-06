@@ -20,7 +20,7 @@ from ..database import SessionLocal
 from .core import AudiTicketBot, CookieData, SiteBlocked, cart_via_regiondo_enabled, jitter
 from .discord import send_discord_notification, send_discord_cart_success, send_discord_blocked
 from .web_push import send_push
-from .scraper import widget_product
+from .scraper import category_stock, widget_product
 
 logger = logging.getLogger(__name__)
 
@@ -186,9 +186,7 @@ class AvailabilityWatcher:
                 if data and total_available > 0:
                     if data != self._last_discord_data:
                         self._last_discord_data = data
-                        asyncio.create_task(
-                            send_discord_notification(data, self.product_url)
-                        )
+                        asyncio.create_task(self._notify_stock(data))
 
                     for sub in list(self.subscribers.values()):
                         if sub.waiting_until and datetime.utcnow() < sub.waiting_until:
@@ -236,6 +234,16 @@ class AvailabilityWatcher:
                 self._bot = None
             db.close()
             self.manager._remove_watcher(self.key)
+
+    async def _notify_stock(self, data: dict):
+        """Discord stock alert with tickets left per category. Runs as its own
+        task, so the extra lookups never delay the add-to-cart."""
+        try:
+            categories = await category_stock(self.event_id)
+        except Exception as e:
+            logger.warning(f"[Watcher {self.key}] category stock failed: {e}")
+            categories = None
+        await send_discord_notification(data, self.product_url, categories)
 
     async def _handle_availability(self, sub: TaskSubscriber, data: dict, prev_total: int = -1):
         """Handle ticket availability for a single subscriber task."""

@@ -128,8 +128,19 @@ def _embed(title: str, color: int, fields: list, thumbnail: bool = True) -> dict
     return embed
 
 
-async def send_discord_notification(data: Dict[str, Any], product_url: str):
-    """Send ticket availability notification."""
+def _category_field(categories: Optional[list]) -> list:
+    """One "Stock per category" field: "🟢 Block 237 - Kategorie 3: 24 / 180"."""
+    if not categories:
+        return []
+    lines = [f"{'🟢' if c['available'] else '🔴'} {c['title']}: **{c['available']}** / {c['capacity']}"
+             for c in categories]
+    return [_field("Stock per category", "\n".join(lines))]
+
+
+async def send_discord_notification(data: Dict[str, Any], product_url: str,
+                                    categories: Optional[list] = None):
+    """Send ticket availability notification; `categories` (scraper.category_stock)
+    adds the tickets left per category."""
     fields = []
     for date, values in list(data.items())[:8]:
         for entry in values:
@@ -150,7 +161,8 @@ async def send_discord_notification(data: Dict[str, Any], product_url: str):
         "embeds": [_embed(
             "🎫 Tickets Available!",
             _COLOR_GREEN,
-            [_field("Website", "Audi Ticket"), _field("Product", _product_label(product_url))] + fields,
+            [_field("Website", "Audi Ticket"), _field("Product", _product_label(product_url))]
+            + fields + _category_field(categories),
         )]
     }
     await send_discord_message(msg)
