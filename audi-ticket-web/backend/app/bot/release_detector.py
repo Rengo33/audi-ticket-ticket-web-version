@@ -17,10 +17,11 @@ from datetime import datetime
 
 from ..database import SessionLocal
 from ..models import Task, ReleaseDetector
-from .scraper import get_listing_products, widget_lookup, widget_product, product_facts, product_view_url
+from .scraper import get_listing_products, widget_lookup, widget_product, api_visible, product_facts, product_view_url
 from .monitor import task_manager
 from .core import BLOCKED_GIVE_UP_S, jitter
-from .discord import send_discord_new_event, send_discord_blocked, send_discord_released, send_discord_edited
+from .discord import (send_discord_new_event, send_discord_blocked, send_discord_released,
+                      send_discord_edited, send_discord_flip)
 
 logger = logging.getLogger(__name__)
 
@@ -240,9 +241,14 @@ class ReleaseDetectorManager:
 
     async def _check_releases(self, cfg: ReleaseDetector):
         """Read each product found hidden from the widget route (the shop's own
-        record, no Cloudflare). `status` "1" = live: ping Discord with how long
-        it stayed hidden. A changed `updated_at` while still hidden = Audi
-        edited it, which tends to come shortly before a release: ping that too.
+        record, no Cloudflare) and ping Discord on every change:
+        - `status` "1" while the product API still 404s = Audi enabled it, but
+          it may be a placeholder (they enable for seconds and hide again);
+          `status` back to "2" = hidden again.
+        - `status` "1" and the product API 200 = released for real: ping with
+          how long it stayed hidden and stop watching it.
+        - a changed `updated_at` while hidden = Audi edited it, which tends to
+          come shortly before a release.
         Runs right after the frontier scan, so a product that was already live
         when found gets its ping in the same scan."""
         awaiting = json.loads(cfg.awaiting_release or "{}")
@@ -256,16 +262,28 @@ class ReleaseDetectorManager:
             except Exception as e:
                 logger.warning(f"[Detector] release check {pid} failed: {e}")
                 break
-            if rec and rec.get("status") == "1":
+            url = product_view_url(int(pid))
+            enabled = bool(rec) and rec.get("status") == "1"
+            try:
+                public = enabled and await api_visible(pid)
+            except Exception as e:
+                logger.warning(f"[Detector] product API check {pid} failed: {e}")
+                break
+            if public:
                 logger.info(f"[Detector] {pid} released {info['name']!r}")
                 del awaiting[pid]
-                await send_discord_released(product_view_url(int(pid)), info["name"], found)
-            elif rec and "updated" not in info:
+                await send_discord_released(url, info["name"], found)
+                continue
+            if rec and enabled != bool(info.get("enabled")):
+                logger.info(f"[Detector] {pid} {'enabled (not public yet)' if enabled else 'hidden again'}")
+                info["enabled"] = enabled
+                await send_discord_flip(url, info["name"], enabled)
+            if rec and "updated" not in info:
                 info["updated"] = rec.get("updated_at")  # first look: baseline only
             elif rec and rec.get("updated_at") != info["updated"]:
                 logger.info(f"[Detector] {pid} edited while hidden ({info['updated']} -> {rec.get('updated_at')})")
                 info["updated"] = rec.get("updated_at")
-                await send_discord_edited(product_view_url(int(pid)), info["name"], product_facts(rec))
+                await send_discord_edited(url, info["name"], product_facts(rec))
             elif (now - found).days > RELEASE_WATCH_DAYS:
                 del awaiting[pid]
         cfg.awaiting_release = json.dumps(awaiting, sort_keys=True)

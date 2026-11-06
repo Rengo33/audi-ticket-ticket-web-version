@@ -357,6 +357,19 @@ async def widget_product(pid) -> Optional[dict]:
     return data if data.get("entity_id") else None
 
 
+async def api_visible(pid) -> bool:
+    """True once the product API serves the product, which it only does for
+    public products (404 while hidden, including Audi's brief placeholder
+    enables). Raises on anything but 200/404."""
+    global _widget_session
+    if _widget_session is None:
+        _widget_session = AsyncSession(impersonate="safari17_2_ios", timeout=15)
+    r = await _widget_session.get(PRODUCT_API.format(pid), headers=PRODUCT_API_HEADERS)
+    if r.status_code not in (200, 404):
+        raise RuntimeError(f"product API {pid} returned {r.status_code}")
+    return r.status_code == 200
+
+
 def product_view_url(pid: int) -> str:
     """Public product page by ID: 301 to /kategorien while hidden, 200 once live."""
     return f"{BASE_URL}/catalog/product/view/id/{pid}"

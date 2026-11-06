@@ -181,6 +181,19 @@ async def send_discord_new_event(product_url: str, carted: bool, name: str = "",
     await send_discord_message(msg)
 
 
+async def send_discord_flip(product_url: str, name: str, enabled: bool):
+    """Audi switched a hidden product on (not public yet — often only a
+    placeholder for a few seconds) or back off."""
+    title = ("🟡 Enabled by Audi — not public yet (may be a placeholder)" if enabled
+             else "⚪ Hidden again")
+    msg = {
+        "username": "Audi Ticket Bot",
+        "embeds": [_embed(title, 0xF5A623 if enabled else 0x9B9B9B,
+                          [_field("Product", f"[{name}]({product_url})")], thumbnail=False)]
+    }
+    await send_discord_message(msg)
+
+
 async def send_discord_edited(product_url: str, name: str, facts: Optional[dict] = None):
     """Audi saved a product that is still hidden — edits tend to come shortly
     before a release, so this is the early warning."""

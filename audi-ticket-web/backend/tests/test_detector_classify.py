@@ -9,7 +9,12 @@ async def fake_widget_product(pid): return recs.get(str(pid))
 pings = []
 async def fake_edited(url, name, facts=None): pings.append(("edited", name))
 async def fake_released(url, name, found): pings.append(("released", name))
+async def fake_flip(url, name, enabled): pings.append(("enabled" if enabled else "hidden", name))
+public = set()
+async def fake_api_visible(pid): return str(pid) in public
 rd.widget_product = fake_widget_product
+rd.api_visible = fake_api_visible
+rd.send_discord_flip = fake_flip
 rd.send_discord_edited = fake_edited
 rd.send_discord_released = fake_released
 
@@ -61,16 +66,22 @@ assert cfg4.frontier_id == 104 and "102" in json.loads(cfg4.events_log)[0]["url"
 print("seed ok")
 
 
-# release checks on hidden products: baseline first, ping once per edit, then release
-recs.clear(); pings.clear()
+# release checks on hidden products: baseline first, ping once per edit,
+# a placeholder enable (status 1, API still 404) is not a release, then release
+recs.clear(); pings.clear(); public.clear()
 recs["500"] = {"entity_id": "500", "status": "2", "updated_at": "a", "description": ""}
 cfg5 = SimpleNamespace(awaiting_release=json.dumps({"500": {"name": "G", "found": "2026-11-01T00:00:00"}}))
 m5 = rd.ReleaseDetectorManager()
-asyncio.run(m5._check_releases(cfg5)); assert pings == [], pings              # baseline only
+run = lambda: asyncio.run(m5._check_releases(cfg5))
+run(); assert pings == [], pings                                   # baseline only
 recs["500"]["updated_at"] = "b"
-asyncio.run(m5._check_releases(cfg5)); assert pings == [("edited", "G")], pings
-asyncio.run(m5._check_releases(cfg5)); assert pings == [("edited", "G")], pings  # no repeat
+run(); assert pings == [("edited", "G")], pings
+run(); assert pings == [("edited", "G")], pings                    # no repeat
 recs["500"]["status"] = "1"
-asyncio.run(m5._check_releases(cfg5))
-assert pings[-1] == ("released", "G") and json.loads(cfg5.awaiting_release) == {}, pings
+run(); assert pings[-1] == ("enabled", "G") and "500" in json.loads(cfg5.awaiting_release), pings
+run(); assert pings.count(("enabled", "G")) == 1, pings            # no repeat while enabled
+recs["500"]["status"] = "2"
+run(); assert pings[-1] == ("hidden", "G") and "500" in json.loads(cfg5.awaiting_release), pings
+recs["500"]["status"] = "1"; public.add("500")
+run(); assert pings[-1] == ("released", "G") and json.loads(cfg5.awaiting_release) == {}, pings
 print("release checks ok")
