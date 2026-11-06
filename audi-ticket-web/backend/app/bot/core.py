@@ -127,7 +127,7 @@ class AudiTicketBot:
     """
     
     BASE_URL = "https://audidefuehrungen2.regiondo.de"
-    REGIONDO_NET = "https://regiondo.net"  # CF-free marketplace host (fallback ATC)
+    REGIONDO_NET = "https://regiondo.net"  # CF-free marketplace host (opt-in ATC route)
 
     def __init__(self):
         self.session: Optional[AsyncSession] = None
@@ -411,13 +411,13 @@ class AudiTicketBot:
         self, event_id: str, date: str, time_short: str, ticket_variation: str,
         option_number: str, quantity: int, product_url: str
     ) -> Tuple[bool, Optional[CookieData], Optional[str]]:
-        """CF-free fallback ATC via regiondo.net (the marketplace host).
+        """CF-free ATC via regiondo.net (the marketplace host).
 
         regiondo.net serves the same Magento `ajaxadd` with no Cloudflare and no
         origin pinning (~250 ms). The cart lands in the marketplace store, but
         checkout there renders the same Audi buyer fields and places a real,
-        Audi-visible order (verified 2026-11-06, booking 101804078317). Used when
-        Cloudflare hard-blocks the Audi host.
+        Audi-visible order (verified 2026-11-06, booking 101804078317). Used only
+        when the `cart_via_regiondo` switch is on — never as an automatic fallback.
 
         The shop sets `frontend` for domain `.regiondo.de`, which a client on
         regiondo.net drops — so we read it from Set-Cookie and return it scoped
@@ -448,8 +448,6 @@ class AudiTicketBot:
                     data = r.json()
                 except Exception:
                     return False, None, "non-JSON response"
-                # ponytail: trust success:true (add_success html); no phantom-cart
-                # re-check here — add a checkout verify if phantoms show up.
                 if data.get("success") is not True:
                     msg = "refused"
                     if data.get("messages"):
@@ -457,6 +455,14 @@ class AudiTicketBot:
                     elif data.get("error"):
                         msg = data["error"]
                     return False, None, msg
+                # Same quote-item check as add_to_cart, minus the checkout-page
+                # verify. ponytail: skipped when the fields are absent (not yet
+                # seen on a real regiondo.net add); add a www.regiondo.de cart
+                # verify if phantoms show up.
+                if "qtm_quote_item_ids" in data:
+                    qtys = data.get("qtm_quote_item_qtys") or 0
+                    if not data["qtm_quote_item_ids"] or int(qtys) <= 0:
+                        return False, None, "No items added to cart (out of stock?)"
                 frontend = None
                 for k, v in r.headers.multi_items():
                     if k.lower() == "set-cookie" and v.lstrip().startswith("frontend="):

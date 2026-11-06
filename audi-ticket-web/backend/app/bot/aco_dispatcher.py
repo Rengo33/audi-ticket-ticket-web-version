@@ -18,6 +18,7 @@ from typing import Optional, Tuple
 
 from sqlalchemy.orm import Session
 
+from ..config import get_settings
 from ..models import BillingProfile, CartSession
 from ..database import SessionLocal
 from .checkout import AutoCheckout
@@ -271,6 +272,10 @@ class AcoDispatcher:
                     return False, f"Cart already {cart.checkout_status}"
                 if cart.expires_at and datetime.utcnow() > cart.expires_at:
                     return False, "Cart expired"
+                # AutoCheckout drives the Audi host only; a regiondo.net cart
+                # lives in the marketplace store and would fail at billing.
+                if cart.checkout_url and not cart.checkout_url.startswith(get_settings().audi_base_url):
+                    return False, "regiondo.net cart — manual checkout only (copy cookie)"
 
                 # Pick a profile
                 if forced_profile_id is not None:

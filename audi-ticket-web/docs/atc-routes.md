@@ -140,7 +140,10 @@ through regiondo.net and stores the cart with
 Deferred (needs work / a paid test first):
 - Mobile proxy (`api/checkout.py`) + server-side ACO are still Audi-host only;
   they don't yet drive the www.regiondo.de checkout for a regiondo-channel cart.
-- No phantom-cart re-check on the regiondo path (trusts `success:true`).
+  ACO refuses regiondo carts (`run_checkout` guard) and the cookie endpoint
+  returns the cart's own `checkout_url`, so checkout is manual via cookie copy.
+- No checkout-page phantom re-check on the regiondo path; only the
+  `qtm_quote_item_*` check, and only when the response carries those fields.
 
 Gain over Bypass on the add itself is only ~90 ms, so regiondo.net is an
 on-demand alternate route, not the default.

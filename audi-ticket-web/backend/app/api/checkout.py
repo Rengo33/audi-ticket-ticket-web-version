@@ -217,7 +217,7 @@ async def get_checkout_cookie(token: str, db: Session = Depends(get_db)):
             "name": cart.cookie_name,
             "value": cart.cookie_value,
             "domain": cart.cookie_domain,
-            "checkout_url": f"{settings.audi_base_url}/checkout/cart",
+            "checkout_url": cart.checkout_url or f"{settings.audi_base_url}/checkout/cart",
             "expires_at": cart.expires_at.isoformat() + "Z",
         }
     )
