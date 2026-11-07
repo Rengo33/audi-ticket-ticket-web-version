@@ -76,7 +76,7 @@ Services: `backend`, `frontend`, `nginx`, `certbot`. Production deploy = rsync t
 ### Key Data Flow
 1. A task is created with a product URL (or by the release detector / scheduler)
 2. `TaskManager` gets event/ticket IDs from the product page, or from the product API for `/catalog/product/view/id/N` URLs (waits until the product is live)
-3. The shared watcher polls `catalog_ajax/dates` every ~10 s (`default_scan_interval`, ±30% jitter)
+3. The shared watcher polls `catalog_ajax/dates` every ~10 s (`default_scan_interval`, ±30% jitter): the total (`ticket_id=`) plus, in parallel, each subscribed category (`variation_id=`); a task decides on its own category's stock
 4. On stock it resolves the option ID and fires concurrent `ajaxadd` requests, each in its own session
 5. On success it stores the `frontend` cookie as a `CartSession` with a unique token (Discord + push notify)
 6. Checkout via the mobile proxy page (token = auth) or server-side ACO

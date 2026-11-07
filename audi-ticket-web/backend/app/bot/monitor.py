@@ -34,6 +34,15 @@ SHOP_FALLBACK_S = 60
 settings = get_settings()
 
 
+def _category_qty(cats: Optional[dict], variation, date: str, time_: str, fallback: int) -> int:
+    """The category's own stock for this slot, or the slot total when this scan
+    has no number for it (first scan, or its call failed)."""
+    for t in ((cats or {}).get(str(variation)) or {}).get(date, []):
+        if t.get('time') == time_:
+            return t.get('qty_available', 0)
+    return fallback
+
+
 class TaskSubscriber:
     """A task subscribed to an AvailabilityWatcher."""
     def __init__(self, task_id: int, product_url: str, quantity: int, num_threads: int, price_category: int):
@@ -65,6 +74,7 @@ class AvailabilityWatcher:
         # variation id -> option id. Option IDs don't depend on date/time, and
         # they are filled before stock opens, so the add-to-cart skips the lookup.
         self._option_cache: Dict[str, str] = {}
+        self._variations: list = []  # category IDs in index order, from the last total scan
         self._last_broadcast = 0.0
 
     @property
@@ -109,7 +119,7 @@ class AvailabilityWatcher:
 
             while self.subscribers:
                 try:
-                    data = await self._bot.get_available_tickets(self.event_id, self.ticket_id)
+                    data, cats = await self._scan()
                     self.scan_count += 1
                     _consecutive_errors = 0
                     self._bot.raise_if_blocked()
@@ -196,13 +206,15 @@ class AvailabilityWatcher:
                             continue
                         if sub.processing:
                             continue
-                        if data == sub.previous_data:
+                        # A category can refill while the total stays put
+                        # (another sells out), so its own stock counts as a change.
+                        if (data, cats) == sub.previous_data:
                             continue
 
-                        sub.previous_data = data
+                        sub.previous_data = (data, cats)
                         sub.processing = True
                         asyncio.create_task(
-                            self._handle_availability(sub, data, _prev_was)
+                            self._handle_availability(sub, data, _prev_was, cats)
                         )
 
                 if data is None or (data and len(data) == 0):
@@ -258,7 +270,24 @@ class AvailabilityWatcher:
             categories = None
         await send_discord_notification(data, self.product_url, categories)
 
-    async def _handle_availability(self, sub: TaskSubscriber, data: dict, prev_total: int = -1):
+    async def _scan(self):
+        """Stock for all categories together plus each subscribed category's own,
+        fetched in parallel so the extra calls add no delay. Category IDs come
+        from the previous total scan, so the very first scan has the total only."""
+        wanted = sorted({self._variations[s.price_category] for s in self.subscribers.values()
+                         if s.price_category < len(self._variations)})
+        results = await asyncio.gather(
+            self._bot.get_available_tickets(self.event_id, self.ticket_id),
+            *(self._bot.get_available_tickets(self.event_id, self.ticket_id, variation_id=v) for v in wanted))
+        data = results[0]
+        for tickets in (data or {}).values():
+            if tickets:
+                self._variations = [str(v) for v in tickets[0].get('variations', [])]
+                break
+        # A failed category call (None) falls back to the total for that category.
+        return data, {v: d for v, d in zip(wanted, results[1:]) if d is not None}
+
+    async def _handle_availability(self, sub: TaskSubscriber, data: dict, prev_total: int = -1, cats: Optional[dict] = None):
         """Handle ticket availability for a single subscriber task."""
         db = SessionLocal()
         try:
@@ -278,25 +307,11 @@ class AvailabilityWatcher:
 
             for date, tickets in data.items():
                 for ticket in tickets:
-                    qty_available = ticket['qty_available']
-                    if qty_available < sub.quantity:
+                    if ticket['qty_available'] < sub.quantity:
                         continue
-
-                    await self.manager._log(sub.task_id, "info",
-                        f"Attempting {sub.quantity} ticket(s) for {date} @ {ticket['time']} ({qty_available} available)", db)
-
-                    time_encoded = quote(ticket['time'], safe='')
-                    # Send ticket_time exactly as the availability endpoint returned it.
-                    # Truncating to HH:MM is accepted for plain slots ("10:30:00") but the
-                    # shop rejects it for range slots ("10:00:00-16:00:00") with
-                    # "Die gewünschte Menge ist nicht verfügbar." Both verified live.
-                    time_short = ticket['time']
                     variations = ticket.get('variations', [])
                     if not variations:
                         continue
-
-                    await self.manager._log(sub.task_id, "info",
-                        f"Available variations: {variations} (selecting index {sub.price_category})", db)
 
                     # Use only the user's chosen variation — no fallbacks.
                     # If the chosen index isn't in the returned list, skip
@@ -308,6 +323,25 @@ class AvailabilityWatcher:
                         sub.previous_data = None
                         return
                     variation = variations[sub.price_category]
+
+                    # The slot total hides a sold-out category (2 = 2 + 0): decide on
+                    # the chosen category's own stock when this scan has it.
+                    qty_available = _category_qty(cats, variation, date, ticket['time'], ticket['qty_available'])
+                    if qty_available < sub.quantity:
+                        await self.manager._log(sub.task_id, "info",
+                            f"Category {variation}: {qty_available} left on {date} — waiting", db)
+                        continue
+
+                    await self.manager._log(sub.task_id, "info",
+                        f"Attempting {sub.quantity} ticket(s) for {date} @ {ticket['time']} "
+                        f"({qty_available} available in category {variation}, variations {variations})", db)
+
+                    time_encoded = quote(ticket['time'], safe='')
+                    # Send ticket_time exactly as the availability endpoint returned it.
+                    # Truncating to HH:MM is accepted for plain slots ("10:30:00") but the
+                    # shop rejects it for range slots ("10:00:00-16:00:00") with
+                    # "Die gewünschte Menge ist nicht verfügbar." Both verified live.
+                    time_short = ticket['time']
 
                     cache_key = str(variation)
                     option_number = self._option_cache.get(cache_key)

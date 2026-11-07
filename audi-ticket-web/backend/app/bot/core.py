@@ -240,18 +240,21 @@ class AudiTicketBot:
     
     async def get_available_tickets(
         self, 
-        event_id: str, 
-        ticket_id: str
+        event_id: str,
+        ticket_id: str,
+        variation_id: Optional[str] = None
     ) -> Optional[Dict[str, Any]]:
         """
-        Check AJAX endpoint for ticket availability.
-        
+        Check AJAX endpoint for ticket availability: all categories together, or
+        one category's own stock with `variation_id` (same response shape).
+
         Returns:
             Dict with availability data or None on error
         """
+        which = f"variation_id={variation_id}" if variation_id else f"ticket_id={ticket_id}"
         url = (
             f"{self.BASE_URL}/product/catalog_ajax/dates/id/{event_id}/"
-            f"?___store=wl_de&ticket_id={ticket_id}&availabilityType=starttime"
+            f"?___store=wl_de&{which}&availabilityType=starttime"
         )
         
         try:
