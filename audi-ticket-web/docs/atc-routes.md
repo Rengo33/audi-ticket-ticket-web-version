@@ -127,7 +127,9 @@ unchanged.
 Still unproven: a **paid** marketplace-channel order (payone/Stripe + 3DS, not
 `invoice`) and which invoice Audi then issues — needs a real paid test.
 
-### Built: regiondo.net as an explicit, opt-in cart mode
+### Built, then removed (2026-11-07): regiondo.net as an opt-in cart mode
+
+Removed at the user's request (not going to be used); the notes below describe how it worked.
 
 `AudiTicketBot.add_to_cart_regiondo(...)` (core.py) carts via regiondo.net and
 returns the `frontend` cookie scoped to `.regiondo.de`. It is a **separate mode**,

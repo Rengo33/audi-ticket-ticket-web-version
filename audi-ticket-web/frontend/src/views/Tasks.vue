@@ -16,15 +16,6 @@
           </label>
           <span :class="{ on: shopViaOrigin }">Bypass</span>
         </div>
-        <!-- Cart route: Audi host (default) or regiondo.net (CF-free marketplace) -->
-        <div class="shop-mode">
-          <span :class="{ on: !cartViaRegiondo }">Audi host</span>
-          <label class="switch" :class="{ busy: shopBusy }">
-            <input type="checkbox" :checked="cartViaRegiondo" :disabled="shopBusy" @change="toggleCartMode($event.target.checked)" />
-            <span class="track"></span>
-          </label>
-          <span :class="{ on: cartViaRegiondo }">regiondo.net</span>
-        </div>
         <button @click="showModal = true" class="btn btn-primary" aria-label="New task">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
           <span>New task</span>
@@ -287,24 +278,16 @@ const fetchBillingProfiles = async () => {
 };
 
 const shopViaOrigin = ref(false);
-const cartViaRegiondo = ref(false);
 const shopBusy = ref(false);
 const fetchShopMode = async () => {
   try {
     const s = await api.get('/api/settings');
     shopViaOrigin.value = s.shop_via_origin;
-    cartViaRegiondo.value = s.cart_via_regiondo;
   } catch { /* ignore */ }
 };
-// Both modes live in one settings row, so every PUT sends both to avoid
-// clobbering the other flag.
 const putShopMode = async () => {
-  const s = await api.put('/api/settings', {
-    shop_via_origin: shopViaOrigin.value,
-    cart_via_regiondo: cartViaRegiondo.value,
-  });
+  const s = await api.put('/api/settings', { shop_via_origin: shopViaOrigin.value });
   shopViaOrigin.value = s.shop_via_origin;
-  cartViaRegiondo.value = s.cart_via_regiondo;
 };
 const toggleShopMode = async (enabled) => {
   shopBusy.value = true;
@@ -312,14 +295,6 @@ const toggleShopMode = async (enabled) => {
   shopViaOrigin.value = enabled;
   try { await putShopMode(); }
   catch { shopViaOrigin.value = prev; await fetchShopMode(); }
-  finally { shopBusy.value = false; }
-};
-const toggleCartMode = async (enabled) => {
-  shopBusy.value = true;
-  const prev = cartViaRegiondo.value;
-  cartViaRegiondo.value = enabled;
-  try { await putShopMode(); }
-  catch { cartViaRegiondo.value = prev; await fetchShopMode(); }
   finally { shopBusy.value = false; }
 };
 

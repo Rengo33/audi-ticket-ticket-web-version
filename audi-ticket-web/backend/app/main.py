@@ -14,7 +14,7 @@ from .config import get_settings
 from .database import init_db, SessionLocal
 from .api import auth, tasks, checkout, websocket, games, billing, push, detector, settings as settings_api
 from .bot.monitor import task_manager
-from .bot.core import set_shop_via_origin, set_cart_via_regiondo
+from .bot.core import set_shop_via_origin
 from .bot.release_detector import release_detector
 from .bot import web_push
 from .models import AppSettings, Task, TaskStatus, ReleaseDetector
@@ -47,7 +47,6 @@ async def lifespan(app: FastAPI):
     try:
         row = AppSettings.get(db)
         set_shop_via_origin(row.shop_via_origin)
-        set_cart_via_regiondo(bool(row.cart_via_regiondo))
     finally:
         db.close()
 

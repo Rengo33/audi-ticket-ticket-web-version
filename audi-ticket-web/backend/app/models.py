@@ -237,9 +237,6 @@ class AppSettings(Base):
 
     id = Column(Integer, primary_key=True, default=1)
     shop_via_origin = Column(Boolean)
-    # Opt-in ATC route: cart through regiondo.net (CF-free marketplace) instead
-    # of the Audi host. Never auto-engaged — the UI flips it explicitly.
-    cart_via_regiondo = Column(Boolean, default=False)
 
     @classmethod
     def get(cls, db) -> "AppSettings":
@@ -247,8 +244,7 @@ class AppSettings(Base):
         row = db.get(cls, 1)
         if row is None:
             from .config import get_settings
-            row = cls(id=1, shop_via_origin=get_settings().shop_via_origin,
-                      cart_via_regiondo=False)
+            row = cls(id=1, shop_via_origin=get_settings().shop_via_origin)
             db.add(row)
             db.commit()
         return row
