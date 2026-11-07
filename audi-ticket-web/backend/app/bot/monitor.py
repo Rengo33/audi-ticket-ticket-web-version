@@ -268,7 +268,7 @@ class AvailabilityWatcher:
         except Exception as e:
             logger.warning(f"[Watcher {self.key}] category stock failed: {e}")
             categories = None
-        await send_discord_notification(data, self.product_url, categories)
+        await send_discord_notification(data, self.product_url, categories, self.event_id)
 
     async def _scan(self):
         """Stock for all categories together plus each subscribed category's own,
