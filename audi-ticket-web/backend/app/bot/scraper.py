@@ -398,9 +398,13 @@ async def category_stock(pid) -> List[Dict[str, Any]]:
         if t.status_code != 200:
             raise RuntimeError(f"timeslots {pid}/{c['variation_id']} returned {t.status_code}")
         times = [x for day in (t.json().get("days") or {}).values() for x in day["times"].values()]
+        opt = (c.get("options") or [{}])[0]  # full-price row, as option_ids()
         out.append({"title": c.get("title") or c["variation_id"],
                     "available": sum(x.get("availableQuantity", 0) for x in times),
-                    "capacity": sum(x.get("capacity", 0) for x in times)})
+                    "capacity": sum(x.get("capacity", 0) for x in times),
+                    "variation_id": str(c["variation_id"]),
+                    "option_id": str(opt["option_id"]) if opt.get("option_id") else None,
+                    "max_qty": int(opt.get("max_qty_to_sell") or 0)})
     return out
 
 

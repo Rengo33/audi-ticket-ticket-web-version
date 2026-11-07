@@ -128,19 +128,44 @@ def _embed(title: str, color: int, fields: list, thumbnail: bool = True) -> dict
     return embed
 
 
-def _category_field(categories: Optional[list]) -> list:
-    """One "Stock per category" field: "🟢 Block 237 - Kategorie 3: 24 / 180"."""
+SHOP_URL = "https://audidefuehrungen2.regiondo.de"
+MAX_LINK_QTY = 4  # per-order cap of the Bayern games
+
+
+def cart_link(product_id: str, date: str, time_: str, variation_id: str, option_id: str, qty: int) -> str:
+    """A link that carts into the browser that opens it, in that person's own
+    session: the shop's own fallback for cookie-blocked browsers (GET ajaxadd,
+    then a redirect to the cart). Time as the shop's JS sends it ("20:30",
+    ranges "10:00-16:00"); brackets encoded so Discord markdown keeps the URL."""
+    t = "-".join(part[:5] for part in time_.split("-"))
+    return (f"{SHOP_URL}/checkout/ajaxcart/ajaxadd/product/{product_id}"
+            f"?ticket_date={date}&ticket_time={t}&ticket_variation={variation_id}"
+            f"&ticket_option_qty%5B{option_id}%5D={qty}")
+
+
+def _category_field(categories: Optional[list], slot: Optional[tuple] = None) -> list:
+    """One field per category: "🟢 24 / 180 left", plus 1×–4× cart links when
+    `slot` = (product_id, date, time) is known and the category has stock."""
     if not categories:
         return []
-    lines = [f"{'🟢' if c['available'] else '🔴'} {c['title']}: **{c['available']}** / {c['capacity']}"
-             for c in categories]
-    return [_field("Stock per category", "\n".join(lines))]
+    fields = []
+    for c in categories:
+        value = f"{'🟢' if c['available'] else '🔴'} **{c['available']}** / {c['capacity']} left"
+        if slot and c['available'] > 0 and c.get('option_id'):
+            top = min(c['available'], c.get('max_qty') or MAX_LINK_QTY, MAX_LINK_QTY)
+            links = " · ".join(f"[{n}×]({cart_link(*slot, c['variation_id'], c['option_id'], n)})"
+                               for n in range(1, top + 1))
+            value += f"\n🛒 {links}"
+        fields.append(_field(c['title'], value))
+    return fields
 
 
 async def send_discord_notification(data: Dict[str, Any], product_url: str,
-                                    categories: Optional[list] = None):
+                                    categories: Optional[list] = None,
+                                    product_id: Optional[str] = None):
     """Send ticket availability notification; `categories` (scraper.category_stock)
-    adds the tickets left per category."""
+    adds the tickets left per category, and with `product_id` cart links that
+    anyone can open to cart in their own browser (single-slot products only)."""
     fields = []
     for date, values in list(data.items())[:8]:
         for entry in values:
@@ -156,13 +181,18 @@ async def send_discord_notification(data: Dict[str, Any], product_url: str,
     if not fields:
         return
 
+    # ponytail: links only for one date/time (every Bayern game); tours with many
+    # slots would need a link set per slot and overflow the embed.
+    slots = [(d, e['time']) for d, values in data.items() for e in values]
+    slot = (product_id, *slots[0]) if product_id and len(slots) == 1 else None
+
     msg = {
         "username": "Audi Ticket Bot",
         "embeds": [_embed(
             "🎫 Tickets Available!",
             _COLOR_GREEN,
             [_field("Website", "Audi Ticket"), _field("Product", _product_label(product_url))]
-            + fields + _category_field(categories),
+            + fields + _category_field(categories, slot),
         )]
     }
     await send_discord_message(msg)
