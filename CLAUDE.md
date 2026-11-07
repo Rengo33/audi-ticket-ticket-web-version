@@ -53,10 +53,10 @@ Services: `backend`, `frontend`, `nginx`, `certbot`. Production deploy = rsync t
   - `billing.py` - billing profiles (card data encrypted via `crypto.py`)
   - `checkout.py` - cart list, mobile checkout proxy (`/checkout/{token}/...`), cookie copy, manual ACO trigger
   - `detector.py` - release detector config/status
-  - `settings.py` - runtime switches `shop_via_origin` (Bypass) and `cart_via_regiondo`
+  - `settings.py` - runtime switch `shop_via_origin` (Bypass)
   - `push.py` - Web Push subscriptions; `websocket.py` - live updates
 - **Bot logic** in `bot/`:
-  - `core.py` - `AudiTicketBot` (curl_cffi, `safari17_2_ios` impersonation — the only target that reliably passes Cloudflare): availability, option lookup, add-to-cart, phantom-cart check; origin-IP pinning (Bypass); `add_to_cart_regiondo` (opt-in regiondo.net route)
+  - `core.py` - `AudiTicketBot` (curl_cffi, `safari17_2_ios` impersonation — the only target that reliably passes Cloudflare): availability, option lookup, add-to-cart, phantom-cart check; origin-IP pinning (Bypass)
   - `monitor.py` - `TaskManager` singleton; one shared `AvailabilityWatcher` per product; waits for hidden products to go live; concurrent ATC threads; re-cart after the 17-min hold
   - `release_detector.py` - walks Regiondo's global product-ID counter via the booking widget to find new Audi products at creation (before publication) and auto-starts tasks
   - `scraper.py` - games list from the product API; shop listing + booking-widget lookups for the detector
@@ -71,7 +71,7 @@ Services: `backend`, `frontend`, `nginx`, `certbot`. Production deploy = rsync t
 ### Frontend (`audi-ticket-web/frontend/src/`)
 - Vue 3 Composition API, plain CSS with design tokens in `style.css`
 - **Stores** (`stores/`): `api.js` (client), `auth.js`, `tasks.js`, `cart.js`, `logs.js`, `push.js`, `websocket.js`
-- **Views** (`views/`): `Login` (public, with the upcoming-fixtures scoreboard), `Tasks` (home, incl. Bypass/regiondo.net toggles), `Carts`, `Billing`, `Detector`, `Logs`
+- **Views** (`views/`): `Login` (public, with the upcoming-fixtures scoreboard), `Tasks` (home, incl. the Bypass toggle), `Carts`, `Billing`, `Detector`, `Logs`
 
 ### Key Data Flow
 1. A task is created with a product URL (or by the release detector / scheduler)

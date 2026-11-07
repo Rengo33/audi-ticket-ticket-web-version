@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 from ..models import Task, TaskStatus, CartSession, TaskLog
 from ..config import get_settings
 from ..database import SessionLocal
-from .core import AudiTicketBot, CookieData, SiteBlocked, cart_via_regiondo_enabled, jitter
+from .core import AudiTicketBot, CookieData, SiteBlocked, jitter
 from .discord import send_discord_notification, send_discord_cart_success, send_discord_blocked
 from .web_push import send_push
 from .scraper import category_stock, option_ids, widget_product
@@ -842,19 +842,11 @@ class TaskManager:
         atc_bot = AudiTicketBot()
         await atc_bot.start_session()
         try:
-            # Cart route is an explicit mode, never an automatic fallback.
-            if cart_via_regiondo_enabled():
-                success, cookie, error = await atc_bot.add_to_cart_regiondo(
-                    event_id, date, time_short, variation,
-                    option_number, quantity, product_url
-                )
-                checkout_url = "https://www.regiondo.de/checkout/cart"
-            else:
-                success, cookie, error = await atc_bot.add_to_cart(
-                    event_id, date, time_short, variation,
-                    option_number, quantity, product_url
-                )
-                checkout_url = "https://audidefuehrungen2.regiondo.de/checkout/cart"
+            success, cookie, error = await atc_bot.add_to_cart(
+                event_id, date, time_short, variation,
+                option_number, quantity, product_url
+            )
+            checkout_url = "https://audidefuehrungen2.regiondo.de/checkout/cart"
 
             if success and cookie:
                 total_time = time.time() - start_time
